@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "页面翻译",
+  "version": "0.1.0",
+  "description": "在右键菜单翻译整个网页，译文以插入方式显示在原文下方，支持流式输出。",
+  "permissions": ["contextMenus", "activeTab", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "action": {},
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "lib/debug.js",
+        "lib/prompt.js",
+        "lib/text-utils.js",
+        "lib/sanitize.js",
+        "lib/host-discovery.js",
+        "config.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {}
+}
