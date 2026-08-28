@@ -1,0 +1,43 @@
+# Native ES modules, no bundler
+
+Every source file is a native ES module and dependencies are expressed as `import` statements. The service worker is declared `"type": "module"` and pulls its dependencies in with static `import`; the options page loads one module entry (`<script type="module">`), so tag order no longer carries meaning; the content script is a thin classic loader registered in the manifest that dynamically imports the session module. There is no build step: the directory loaded in `chrome://extensions` is still the repository directory, and reloading the extension is the whole edit cycle.
+
+The content script is the one place that cannot be a module directly: MV3's `content_scripts` declaration has no module type, so a content script is always evaluated as a classic script. `src/content-loader.js` therefore exists purely to bridge into the module world — it dynamically imports `src/content.js` and wires the real environment (`document`, `chrome`, `getComputedStyle`) into `createContentSession()`. It holds no business logic.
+
+What this replaces: dependencies used to live in three unrelated lists — the manifest's ordered `content_scripts` array, the `importScripts()` argument list in the service worker, and the `<script>` tag order in `options.html` — with each lib file carrying a dual-environment export wrapper (three different flavours of it) so the same code could be eaten by both the browser's global-symbol loading and Node's CommonJS. Getting an order wrong produced no static error, only a runtime failure; that happened once already (a UMD global mounted on the wrong branch, `HostDiscovery` undefined), and the response at the time was to add a test that guarded the global-symbol contract. That test (`tests/load-order.test.js`) is deleted here: after the switch there are no global symbols left, so the error class it guarded cannot occur. In its place, `tests/manifest-consistency.test.js` guards the error class the switch *introduces* — a manifest or options-page reference to a file that does not exist, or a module in the content script's import graph that was never registered as a web-accessible resource, which fails only at runtime.
+
+Two alternatives were rejected. **A bundler** (esbuild, rollup) would have let the sources be plain ESM with an IIFE artifact, but it breaks the property that the loaded directory *is* the repository directory — every change would need a build before reloading — and it adds build tooling to a repo whose entire toolchain is currently a linter and a formatter. **Keeping the global-symbol system and only deleting the UMD wrappers** would have been the cheapest change, but the dependency graph would still exist solely in those three lists; the soil that produced the load-order incident would remain, and the dual-environment split (the same file loaded two different ways) would be untouched.
+
+## Why `use_dynamic_url` is *not* enabled
+
+Dynamic `import()` of an extension's own module requires the module to be listed in `web_accessible_resources`, which exposes it to pages under a fixed extension ID. The obvious hardening is `use_dynamic_url: true`, which serves those resources only through a per-session ID that is regenerated whenever the browser restarts or the extension reloads, so a page cannot probe for the extension with a URL it knows in advance. **It is deliberately left off: it is incompatible with dynamic `import()`.**
+
+Measured before writing any of this code (ticket 01), on a throwaway probe extension:
+
+- With `use_dynamic_url: true`, the content script's dynamic import of an extension module **fails** with `Failed to fetch dynamically imported module`.
+- With it off, dynamic import succeeds, a static `import` of a second-level dependency inside that module succeeds, a module deliberately left out of `web_accessible_resources` is correctly blocked, and the module service worker with static `import` works.
+- The decisive isolation: with rotation on, `fetch` and `import` were pointed at the **same URL** in the same run — `fetch` returned HTTP 200 (597 bytes) while `import` failed. So the resource is reachable; it is specifically the module loader path that the rotating URL cuts off. This rules out a mis-registration or a wrong path as the explanation.
+
+Known limitation of that measurement: it ran on **Edge 148 headless** (same Chromium engine), because Chrome stable refuses `--load-extension` by enterprise policy (`--load-extension is not allowed in Google Chrome, ignoring`). What was verified is Chromium engine behaviour, not Chrome-branded behaviour.
+
+The cost accepted by turning rotation off is extension fingerprinting: a page can `fetch` a resource under the fixed extension ID and learn the extension is installed. This is acceptable here because the extension is unpacked, private, and never published — it appears on no fingerprinting list — and because it already inserts translation nodes carrying `class=translate-node` into the page, so reading the DOM identifies it far more easily than guessing an ID. Rotating the resource URL would not have closed that path anyway.
+
+`tests/manifest-consistency.test.js` asserts `use_dynamic_url` is not `true`, so a future reader who finds the option in the documentation and switches it on gets a red test instead of an extension that mysteriously stops loading its modules.
+
+## Loader race handling
+
+The loader registers its `onMessage` listener **synchronously** and buffers arriving requests in a queue (returning `true` to hold the response channel open), then dynamically imports the session module and forwards the buffered requests once it is ready. Registering after the `await` instead would drop any message that arrives in the window between `document_idle` and module readiness — and dropping it is not harmless: the background worker treats a failed `sendMessage` as a restricted page (`if (!sess) return`), so that one right-click on "translate" would be silently swallowed, with no error and no feedback.
+
+The loader is therefore the **sole** registration and dispatch point: the session factory only exports `handleMessage` and never registers a listener of its own. A second registration inside the session would make every message that arrives after readiness run twice and call `sendResponse` twice (Chrome accepts only the first, logging an error for the second). `tests/content-rescan.test.js` guards only the session-does-not-register half of this invariant, by having the sandbox play the loader's role and asserting the session registers nothing; the loader itself has no executable test coverage (see Known blind spots below).
+
+## `minimum_chrome_version: 106`
+
+Module service workers have been supported since Chrome 92, but Chrome 106 is where opaque origins — sandboxed iframes and dynamic import among them — gained access to web-accessible resources, which is the path this design depends on. Both figures come from Chrome's own extension documentation. 92 would only cover the service worker half, so the manifest declares 106.
+
+## Known blind spots
+
+Recorded as-found from code review of the switch itself (`d71531f`) and its follow-up fix (`68190de`). None are known production defects; they are places where a future edit could regress silently.
+
+1. **`src/content-loader.js` has no executable test coverage.** This is by design — the spec decided not to test the loader separately (its real behaviour depends on extension URL resolution, which jsdom cannot exercise), leaving its correctness to manual acceptance. Consequence: deleting the loader's `onMessage` registration, or its buffer-and-forward logic, leaves all 101 tests green. The regression test in `tests/content-rescan.test.js` guards only that the *session* does not self-register.
+2. **The test sandbox takes a shortcut the production loader does not.** `tests/helpers/content-sandbox.js` wires `session.handleMessage` synchronously onto the message bus, while the real loader buffers into a pending queue and forwards after the dynamic import resolves. Every test case therefore runs the no-queue, no-async-readiness-window path; the buffer/forward semantics are exercised nowhere in the suite. If loader coverage is ever added, the sandbox should mimic the queue rather than diverge from it.
+3. **The `*`-matches-across-`/` semantics of `web_accessible_resources.resources` is an inference from Chrome's match-pattern documentation, not a measured fact.** The claim lives in a comment in `tests/manifest-consistency.test.js`; ADR text records no measurement. Settling it needs one real-browser load that dynamically imports a module from a subdirectory.

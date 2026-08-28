@@ -1,9 +1,9 @@
 // 宿主即请求（ADR-0005）：renderPrompt 渲染测试——{host} 注入、换行保留、占位符校验；
 // HTML 包装协议（输入包 <html>，输出剥最外层）
-const { test } = require("node:test");
-const assert = require("node:assert");
+import { test } from "node:test";
+import assert from "node:assert";
 
-const { DEFAULT_PROMPT_TEMPLATE, renderPrompt, stripHostWrapper } = require("../lib/prompt.js");
+import { DEFAULT_PROMPT_TEMPLATE, renderPrompt, stripHostWrapper } from "../src/prompt.js";
 
 test("默认模板渲染：注入单宿主骨架并替换 {target}", () => {
   const out = renderPrompt(DEFAULT_PROMPT_TEMPLATE, "<p>a</p>", { target: "中文" });
@@ -42,10 +42,7 @@ test("包装协议: 剥离最外层 html——<html>text</html> → text", () =>
 });
 
 test("包装协议: 文本本身含 html 时只剥最外侧一层", () => {
-  assert.equal(
-    stripHostWrapper("<html><p>a<b>b</b></p></html>"),
-    "<p>a<b>b</b></p>"
-  );
+  assert.equal(stripHostWrapper("<html><p>a<b>b</b></p></html>"), "<p>a<b>b</b></p>");
   // 双重包装只剥一层，内层 <html> 保留
   assert.equal(stripHostWrapper("<html><html>x</html></html>"), "<html>x</html>");
 });

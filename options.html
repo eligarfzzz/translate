@@ -1,45 +1,88 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <title>页面翻译 · 设置</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 24px auto; padding: 0 16px; color: #222; }
-    h1 { font-size: 1.2em; }
-    label { display: block; margin: 12px 0 4px; font-size: 0.9em; color: #444; }
-    input, textarea { width: 100%; box-sizing: border-box; padding: 6px; font-family: inherit; }
-    .row { display: flex; gap: 12px; }
-    .row > div { flex: 1; }
-    button { margin-top: 16px; padding: 8px 16px; cursor: pointer; }
-    #status { margin-left: 12px; color: #2d6da3; }
-    .hint { font-size: 0.8em; color: #888; margin-top: 4px; }
-  </style>
-</head>
-<body>
-  <h1>页面翻译 · 设置</h1>
-  <form id="form">
-    <label>API 端点（OpenAI 兼容）<input name="apiBase" type="text"></label>
-    <label>API 密钥<input name="apiKey" type="password"></label>
-    <label>模型<input name="model" type="text"></label>
-    <label>目标语言<input name="targetLang" type="text"></label>
-    <div class="row">
-      <div>
-        <label>并发上限（同时在途请求数）<input name="concurrency" type="number" min="1" step="1"></label>
+  <head>
+    <meta charset="utf-8" />
+    <title>页面翻译 · 设置</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 24px auto;
+        padding: 0 16px;
+        color: #222;
+      }
+      h1 {
+        font-size: 1.2em;
+      }
+      label {
+        display: block;
+        margin: 12px 0 4px;
+        font-size: 0.9em;
+        color: #444;
+      }
+      input,
+      textarea {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px;
+        font-family: inherit;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+      }
+      .row > div {
+        flex: 1;
+      }
+      button {
+        margin-top: 16px;
+        padding: 8px 16px;
+        cursor: pointer;
+      }
+      #status {
+        margin-left: 12px;
+        color: #2d6da3;
+      }
+      .hint {
+        font-size: 0.8em;
+        color: #888;
+        margin-top: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>页面翻译 · 设置</h1>
+    <form id="form">
+      <label>API 端点（OpenAI 兼容）<input name="apiBase" type="text" /></label>
+      <label>API 密钥<input name="apiKey" type="password" /></label>
+      <label>模型<input name="model" type="text" /></label>
+      <label>目标语言<input name="targetLang" type="text" /></label>
+      <div class="row">
+        <div>
+          <label
+            >并发上限（同时在途请求数）<input name="concurrency" type="number" min="1" step="1"
+          /></label>
+        </div>
       </div>
-    </div>
-    <label>提示词模板（必须包含 {host} 占位符）<textarea name="promptTemplate" rows="10"></textarea></label>
-    <p class="hint">模板中 {host} 为单宿主骨架 HTML 占位符，{target} 为目标语言；模板缺失 {host} 时保存值将被忽略并回退默认。</p>
-    <button type="submit">保存</button>
-    <button type="button" id="restore">恢复默认</button>
-    <button type="button" id="export-logs">导出日志</button>
-    <button type="button" id="clear-logs">清空日志</button>
-    <span id="status"></span>
-    <p class="hint">模型思考（thinking）始终关闭，不可配置。修改保存后，下一次翻译立即生效。</p>
-    <p class="hint">运行日志本地落盘（chrome.storage.local，每通道最近 500 条，密钥自动脱敏）：翻译流程日志在网页控制台（勾选 Verbose），API 请求日志在扩展的 Service Worker 控制台。</p>
-  </form>
-  <script src="lib/debug.js"></script>
-  <script src="lib/prompt.js"></script>
-  <script src="config.js"></script>
-  <script src="options.js"></script>
-</body>
+      <label
+        >提示词模板（必须包含 {host} 占位符）<textarea name="promptTemplate" rows="10"></textarea>
+      </label>
+      <p class="hint">
+        模板中 {host} 为单宿主骨架 HTML 占位符，{target} 为目标语言；模板缺失 {host}
+        时保存值将被忽略并回退默认。
+      </p>
+      <button type="submit">保存</button>
+      <button type="button" id="restore">恢复默认</button>
+      <button type="button" id="export-logs">导出日志</button>
+      <button type="button" id="clear-logs">清空日志</button>
+      <span id="status"></span>
+      <p class="hint">模型思考（thinking）始终关闭，不可配置。修改保存后，下一次翻译立即生效。</p>
+      <p class="hint">
+        运行日志本地落盘（chrome.storage.local，每通道最近 500
+        条，密钥自动脱敏）：翻译流程日志在网页控制台（勾选 Verbose），API 请求日志在扩展的 Service
+        Worker 控制台。
+      </p>
+    </form>
+    <script type="module" src="src/options.js"></script>
+  </body>
 </html>

@@ -1,8 +1,8 @@
 // 工单 04：text-utils 测试——中文占比 0.3 边界、URL 剔除、字母资格、实体剥标
-const { test } = require("node:test");
-const assert = require("node:assert");
+import { test } from "node:test";
+import assert from "node:assert";
 
-const { isChinese, textOf, hasTranslatableText, stripUrlTokens } = require("../lib/text-utils.js");
+import { isChinese, textOf, hasTranslatableText, stripUrlTokens } from "../src/text-utils.js";
 
 // ---- isChinese：汉字占比 > 0.3 视为中文 ----
 

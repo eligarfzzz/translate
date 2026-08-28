@@ -1,6 +1,7 @@
-const { appendRing, maskSecret, fmt, getChannel, MAX_ENTRIES } = require("../lib/debug.js");
-const test = require("node:test");
-const assert = require("node:assert");
+import test from "node:test";
+import assert from "node:assert";
+
+import { appendRing, maskSecret, fmt, getChannel, MAX_ENTRIES } from "../src/debug.js";
 
 test("appendRing: 未超限时全部保留", () => {
   const out = appendRing([{ i: 1 }], { i: 2 }, 500);

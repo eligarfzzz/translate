@@ -1,0 +1,6 @@
+node_modules/
+package-lock.json
+.scratch/
+# 历史 ADR 原文不得改写（只允许追加演进段落）
+docs/adr/
+.git/

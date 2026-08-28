@@ -8,9 +8,9 @@
 // + 手动时钟 + 可选存储配置覆盖）。
 // ============================================================
 
-const test = require("node:test");
-const assert = require("node:assert/strict");
-const { createContentSandbox } = require("./helpers/content-sandbox.js");
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createContentSandbox } from "./helpers/content-sandbox.js";
 
 // 显式安全块（沿用 host-discovery 测试约定：不依赖 jsdom UA 样式表）
 const B = 'style="display:block"';
@@ -35,10 +35,7 @@ test("协议: 一次 translate = N 个宿主各一次独立端口请求，载荷
     assert.equal(starts.length, 1, `端口 ${i} 恰好一条 start 消息`);
     assert.equal(typeof starts[0].text, "string", "start 载荷为单宿主字符串（非数组）");
     assert.ok(!Array.isArray(starts[0].texts), "无条目数组协议残留");
-    assert.ok(
-      starts[0].text.includes(texts[i]),
-      `端口 ${i} 载荷为宿主 ${i} 的骨架 HTML`
-    );
+    assert.ok(starts[0].text.includes(texts[i]), `端口 ${i} 载荷为宿主 ${i} 的骨架 HTML`);
   }
 
   // 无标记协议：回显全文即译文（deliver 不带 [N] 前缀）
@@ -48,7 +45,10 @@ test("协议: 一次 translate = N 个宿主各一次独立端口请求，载荷
   await env.clock.settle();
   const paras = env.body.querySelectorAll("p");
   for (let i = 0; i < 3; i++) {
-    assert.equal(paras[i].querySelector(".translate-node").textContent, `第${["一", "二", "三"][i]}段译文`);
+    assert.equal(
+      paras[i].querySelector(".translate-node").textContent,
+      `第${["一", "二", "三"][i]}段译文`,
+    );
   }
 });
 
@@ -125,8 +125,16 @@ test("失败粒度: 单请求失败只标记该宿主，其余宿主照常完成
   await env.clock.settle();
 
   const paras = env.body.querySelectorAll("p");
-  assert.equal(paras[0].querySelector(".translate-node").textContent, "甲的译文", "宿主 0 照常完成");
-  assert.equal(paras[2].querySelector(".translate-node").textContent, "丙的译文", "宿主 2 照常完成");
+  assert.equal(
+    paras[0].querySelector(".translate-node").textContent,
+    "甲的译文",
+    "宿主 0 照常完成",
+  );
+  assert.equal(
+    paras[2].querySelector(".translate-node").textContent,
+    "丙的译文",
+    "宿主 2 照常完成",
+  );
 
   const failed = paras[1].querySelector(".translate-node");
   assert.equal(failed.textContent, "翻译失败: HTTP 500 boom", "失败宿主显示斜体错误信息");
@@ -137,7 +145,7 @@ test("失败粒度: 单请求失败只标记该宿主，其余宿主照常完成
   assert.equal(
     paras[1].querySelector(".translate-node").textContent,
     "翻译失败: HTTP 500 boom",
-    "错误信息不被动画覆盖"
+    "错误信息不被动画覆盖",
   );
 });
 
@@ -206,7 +214,11 @@ test("收敛: 流式期间高频新增经防抖合并为一次重扫，页面静
   // 每个新宿主恰好一个译文容器
   const paras = env.body.querySelectorAll("p");
   for (let i = 1; i < paras.length; i++) {
-    assert.equal(paras[i].querySelectorAll(".translate-node").length, 1, `宿主 ${i} 恰一个译文容器`);
+    assert.equal(
+      paras[i].querySelectorAll(".translate-node").length,
+      1,
+      `宿主 ${i} 恰一个译文容器`,
+    );
   }
 
   // 页面静止且翻译全部结束：长时间推进不再产生任何请求（无请求风暴、
@@ -356,4 +368,24 @@ test("风暴: class/style 高频抖动夹一次展开，经防抖合并为一次
   await env.clock.advance(10000);
   assert.equal(env.ports.length, atRest, "静止后不再产生新请求端口");
   assert.equal(env.clock.pending(), 0, "调度收敛：无在途计时器");
+});
+
+// ============================================================
+// 消息入口唯一性（工单 05 换轨回归）
+// ============================================================
+
+test("入口唯一: 会话不自注册 onMessage，派发权只属加载器（双份监听回归）", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>single entry english host</p>`,
+  });
+
+  // 会话就绪即断言：加载器已注册监听并负责转发，会话不得再挂一份——
+  // 否则就绪后每条消息被处理两次、sendResponse 调用两次（Chrome 只接受
+  // 第一次，第二次在内容脚本控制台报错），且日志翻倍。
+  assert.equal(env.selfRegisteredListeners(), 0, "会话不得自注册 onMessage 监听");
+
+  // 唯一入口仍能正常工作：一条 translate 消息 = 一个宿主一次请求
+  const reply = await env.send({ type: "translate" });
+  assert.deepEqual(reply, { ok: true }, "加载器派发的消息得到唯一回应");
+  assert.equal(env.ports.length, 1, "一个宿主恰好一次请求（无重复派发）");
 });

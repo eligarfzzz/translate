@@ -1,32 +1,33 @@
 // ============================================================
-// 内容脚本集成测试基建（工单 02）
+// 内容脚本集成测试基建（工单 04）
 //
 // 接缝（spec Testing Decisions）：消息与端口输入 → DOM 输出，
 // 不断言 content.js 内部状态。四件套：
-//   1) jsdom 沙箱按 manifest.json 声明顺序加载全部 content script
-//      （与真实注入一致；沿用 load-order 冒烟测试的沙箱模式）
+//   1) 直接 import 会话工厂 createContentSession，注入 jsdom 环境
+//      （document / chrome 替身 / getComputedStyle）
 //   2) 可控时序的 mock 单宿主请求端口（ADR-0005：每宿主一端口，
 //      无标记协议）：可停在流式中途，再由测试放行完成；
 //      另跟踪在途端口数峰值（并发上限的观测量）
 //   3) 元素几何补丁：jsdom 的 getBoundingClientRect 恒为零，
 //      不补丁则一切宿主被 host-discovery 判为不可见
-//   4) 消息监听捕获：测试以 background 身份向 content script 发消息
-// 另附手动时钟（sandbox 的 setTimeout/clearTimeout/setInterval/
-// clearInterval 全部走 fake clock，测试零真实等待，时序完全可控）。
+//   4) 消息派发：沙箱扮演加载器的角色——会话不自注册 onMessage，
+//      生产环境唯一入口是 src/content-loader.js（见 ADR-0006），
+//      测试以 background 身份向会话的 handleMessage 发消息
+// 另附手动时钟（注入文档所属 window 的 setTimeout/clearTimeout/
+// setInterval/clearInterval 全部走 fake clock，测试零真实等待，
+// 时序完全可控）。
 // ============================================================
 
-"use strict";
+import { JSDOM } from "jsdom";
 
-const fs = require("node:fs");
-const path = require("node:path");
-const vm = require("node:vm");
-const { JSDOM } = require("jsdom");
+import { createContentSession } from "../../src/content.js";
 
-const ROOT = path.join(__dirname, "..", "..");
+// debug.js 的 console 直写：静音 debug 级，保留 error 透传（排查失败用例）
+console.debug = () => {};
 
 // ---------------- 手动时钟 ----------------
 // advance(ms)：逐步推进到目标时刻，途中到期的时间戳/间隔逐波执行，
-// 每波后 flush 微任务与宏任务（setImmediate 轮），让沙箱内的
+// 每波后 flush 微任务与宏任务（setImmediate 轮），让会话内的
 // async 续体（loadConfig / 端口 Promise 链 / MutationObserver 回调）
 // 在下一波计时器执行前就位。
 function createClock() {
@@ -149,7 +150,7 @@ function createPortHub() {
 }
 
 // ---------------- 消息监听捕获 ----------------
-// chrome.runtime.onMessage 替身：捕获 content script 注册的监听器，
+// 消息总线：沙箱把会话的 handleMessage 注册进来（扮演加载器的派发角色），
 // send(msg) 以 background 身份派发并等待 sendResponse（兼容同步回应
 // 与 return true 的异步通道）。
 function createMessageBus() {
@@ -173,7 +174,7 @@ function createMessageBus() {
             };
             const keepOpen = fn(msg, {}, finish);
             if (keepOpen !== true) finish();
-          })
+          }),
       );
       await Promise.all(dispatches);
       return reply;
@@ -182,7 +183,7 @@ function createMessageBus() {
   return bus;
 }
 
-// ---------------- 沙箱组装 ----------------
+// ---------------- 环境组装 ----------------
 // createContentSandbox({ bodyHtml, config }): 初始页面内容 + 可选存储配置覆盖
 // （如 { concurrency: 2 }；经 mergeConfig 合并到默认值之上）。
 // 返回 { dom, doc, body, clock, ports, inflightPorts, peakInflightPorts, send }：
@@ -201,49 +202,41 @@ function createContentSandbox({ bodyHtml = "", config = null } = {}) {
   const clock = createClock();
   const hub = createPortHub();
   const bus = createMessageBus();
+  // 会话若自注册 onMessage 只记录、不派发：非空即为「加载器 + 会话双份监听」回归
+  const selfRegistered = [];
+
+  // 手动时钟接入注入文档所属 window：会话的动画与防抖计时器全部经此排队
+  dom.window.setTimeout = clock.setTimeout;
+  dom.window.clearTimeout = clock.clearTimeout;
+  dom.window.setInterval = clock.setInterval;
+  dom.window.clearInterval = clock.clearInterval;
 
   const chromeStub = {
     runtime: {
-      onMessage: { addListener: bus.addListener },
+      onMessage: { addListener: (fn) => selfRegistered.push(fn) },
       connect: hub.connect,
     },
     storage: {
-      // debug.js 环形日志落盘（回调风格）：内存态即可
+      // debug.js 环形日志落盘：内存态即可
       local: {
-        get: (_key, cb) => cb && cb({}),
-        set: (_obj, cb) => cb && cb(),
+        get: async () => ({}),
+        set: async () => {},
       },
-      // config.js loadConfig 用的 promise 风格读取（可注入存储覆盖）
+      // config.js loadConfig 的存储读取（可注入存储覆盖）
       sync: {
         get: async () => (config ? { config } : {}),
       },
     },
   };
 
-  const sandbox = {
+  const session = createContentSession({
     document: dom.window.document,
-    window: dom.window,
-    Node: dom.window.Node,
-    MutationObserver: dom.window.MutationObserver,
-    getComputedStyle: (el) => dom.window.getComputedStyle(el),
-    // 静音 debug 级日志，保留 error 透传（排查失败用例）
-    console: { debug() {}, log() {}, warn() {}, error: console.error },
-    setTimeout: clock.setTimeout,
-    clearTimeout: clock.clearTimeout,
-    setInterval: clock.setInterval,
-    clearInterval: clock.clearInterval,
     chrome: chromeStub,
-  };
-  sandbox.self = sandbox;
-  sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
+    getComputedStyle: (el) => dom.window.getComputedStyle(el),
+  });
 
-  // 按 manifest 声明顺序加载全部 content script（与真实注入一致）
-  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.json"), "utf8"));
-  for (const file of manifest.content_scripts[0].js) {
-    const code = fs.readFileSync(path.join(ROOT, file), "utf8");
-    vm.runInContext(code, sandbox, { filename: file });
-  }
+  // 沙箱扮演加载器：会话的 handleMessage 是唯一派发目标
+  bus.addListener(session.handleMessage);
 
   // send：派发消息并等回应；随后再 flush 一轮，让消息触发的异步流程
   // （translate 的 loadConfig → 单宿主请求端口建立）就位，测试拿到返回值
@@ -262,8 +255,10 @@ function createContentSandbox({ bodyHtml = "", config = null } = {}) {
     ports: hub.ports,
     inflightPorts: hub.inflight,
     peakInflightPorts: () => hub.peakInflight,
+    // 会话自注册的 onMessage 监听数（应恒为 0：派发权只属加载器）
+    selfRegisteredListeners: () => selfRegistered.length,
     send,
   };
 }
 
-module.exports = { createContentSandbox };
+export { createContentSandbox };

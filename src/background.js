@@ -1,22 +1,17 @@
-// ============================================================
-// background service worker
-// 1) 右键菜单（与 content script 握手决定动作与标题）
-// 2) 左键工具栏图标 → 打开配置页
-// 3) API 全部在此代理发起（MV3 下 content script 无 CORS 豁免，
-//    见 docs/adr/0004-background-worker-proxy.md）
-// ============================================================
+// background service worker：右键菜单 / 左键打开配置页 / API 代理（见 docs/adr/0004）。
 
-// 加载顺序约定：lib/debug.js 最先（日志通道）；lib/prompt.js 先于 config.js（mergeConfig 依赖其全局常量）
-importScripts("lib/debug.js", "lib/prompt.js", "config.js");
+import { getChannel } from "./debug.js";
+import { DEFAULT_PROMPT_TEMPLATE, renderPrompt } from "./prompt.js";
+import { loadConfig } from "./config.js";
 
-const DBG = TranslateDebug.getChannel("bg");
+const DBG = getChannel("bg", chrome.storage);
 
 const MENU_ID = "translate-page";
 
 chrome.runtime.onInstalled.addListener(refreshMenu);
 chrome.runtime.onStartup.addListener(refreshMenu);
 
-// 左键工具栏图标：打开配置页（无 popup 时 action.onClicked 才会触发）
+// 左键工具栏图标：打开配置页
 chrome.action.onClicked.addListener(() => {
   chrome.runtime.openOptionsPage();
 });
@@ -43,7 +38,12 @@ function askSession(tabId) {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (!tab || tab.id == null) return;
   const sess = await askSession(tab.id);
-  DBG.debug("menu click, tab", tab.id, "session:", sess ? (sess.active ? "active" : "idle") : "unavailable");
+  DBG.debug(
+    "menu click, tab",
+    tab.id,
+    "session:",
+    sess ? (sess.active ? "active" : "idle") : "unavailable",
+  );
   if (!sess) return; // 受限页（chrome:// 等）：不切换、不错位
 
   if (sess.active) {
@@ -81,10 +81,9 @@ chrome.runtime.onConnect.addListener((port) => {
     const host = typeof msg.text === "string" ? msg.text : "";
     DBG.debug("host request start");
     try {
-      const cfg = await loadConfig();
+      const cfg = await loadConfig(chrome.storage);
 
-      // 未配置守卫（零痕迹默认）：端点/密钥/模型任一为空时，
-      // 该宿主请求直接以既有错误通道回告（含配置页指引），不发起网络请求。
+      // 未配置守卫（零痕迹默认）：任一为空则经既有错误通道回告（含配置页指引），不发起网络请求。
       const missing = [
         !cfg.apiBase && "API 端点",
         !cfg.apiKey && "API 密钥",
@@ -103,13 +102,13 @@ chrome.runtime.onConnect.addListener((port) => {
         apiBase: cfg.apiBase,
         model: cfg.model,
         concurrency: cfg.concurrency,
-        targetLang: cfg.targetLang
+        targetLang: cfg.targetLang,
       });
       await streamTranslate(
         cfg,
         host,
         (text) => safePost(port, { type: "delta", text }),
-        ac.signal
+        ac.signal,
       );
       DBG.debug("host request done");
       safePost(port, { type: "done" });
@@ -131,15 +130,13 @@ function safePost(port, msg) {
 }
 
 async function streamTranslate(cfg, host, onDelta, signal) {
-  // 宿主为骨架 HTML 片段（只有标签名与文本）：不做任何空白压缩，
-  // 保护缩进与结构。提示词由可配置模板渲染：{host} 注入单宿主骨架，
-  // {target} 注入目标语言；回显全文即译文（无标记协议）。
+  // 骨架 HTML 不做空白压缩，保护缩进与结构；回显全文即译文（无标记协议）。
   const hostHtml = String(host).trim();
-  // 配置中的提示词为空串/纯空白/不含 {host} 时自动回退默认模板
-  // （mergeConfig 运行时语义已兜空值，此处双保险；透传的非空模板可能缺占位符）
-  const template = cfg.promptTemplate && cfg.promptTemplate.includes("{host}")
-    ? cfg.promptTemplate
-    : DEFAULT_PROMPT_TEMPLATE;
+  // 模板缺 {host} 时回退默认（透传的非空模板可能缺占位符，双保险）
+  const template =
+    cfg.promptTemplate && cfg.promptTemplate.includes("{host}")
+      ? cfg.promptTemplate
+      : DEFAULT_PROMPT_TEMPLATE;
   const prompt = renderPrompt(template, hostHtml, { target: cfg.targetLang });
   const url = `${cfg.apiBase}/chat/completions`;
   DBG.debug("upstream request:", url, "model:", cfg.model);
