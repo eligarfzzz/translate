@@ -38,9 +38,18 @@ The output-side counterpart of the media placeholder: the echo sanitizer (saniti
 _Why_: on the way in, the placeholder preserves word order (the model still sees where the media sat); on the way out, there is no sentence-order concern anymore — the media is gone from the translation, so the removal keeps the rendered output clean: no interactive elements, no external resource loads, no layout pollution from a model-invented img/svg/video.
 _Avoid_: media stripping in feed, placeholder in output
 
+**边缘区域 (Peripheral Region)**:
+A page region that is not the main content: `header` / `footer` / `nav` / `aside`, plus their ARIA equivalents (`[role=banner]` / `[role=contentinfo]` / `[role=navigation]` / `[role=complementary]`). A host inside one still gets translated in full; the marking only pushes it to the back of the queue. Its counterpart is the 正文区域 (`main` / `article` / `[role=main]`).
+_Avoid_: 次要区域, chrome, boilerplate, 不翻区域
+
+**翻译优先级 (Translation Priority)**:
+The order in which discovered hosts enter the 并发池: 正文区域 hosts first, unmarked hosts next, 边缘区域 hosts last. A host's tier is decided by the **nearest** marked ancestor, starting from the host itself — so `main > nav` is peripheral and `aside > article` is main content. Within one tier, document order is preserved. Priority is a property of when a host is _requested_, never of where its 译文节点 lands.
+_Avoid_: 排序, 权重, 打分, 区域过滤
+
 ## Rules
 
 - **译文节点 is the only mutation.** Translation never modifies, replaces, or removes original page content; it only inserts translation nodes at host boundaries.
 - **One node per host.** A host has exactly one translation node, holding its entire translation; no temporary streaming residue may remain in the DOM.
 - **Revert removes only translation nodes.** The original DOM must be exactly as it was before translation.
+- **翻译优先级 only reorders requests.** Sorting by priority changes the order hosts are sent to the endpoint, never the position of any 译文节点 and never the page layout. Every discovered host is still translated; no tier is skipped.
 - **Requests are independent.** A failed request shows an italic error message in that host's translation node; every other host still completes.

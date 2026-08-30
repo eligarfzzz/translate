@@ -26,6 +26,30 @@ const HARD_SKIP_SELECTOR =
   "textarea, input, select, option, [contenteditable='true'], [role='textbox'], " +
   "[aria-hidden='true'], .translate-node";
 
+// 区域标记表：决定宿主的翻译优先级档位（只影响请求发起顺序，不影响译文位置）。
+// 标签与 role 等价——大量站点用 div role=navigation 而不写 <nav>，只认标签会漏掉一半。
+const TOP_REGION_SELECTOR = "main, article, [role='main']";
+const PERIPHERAL_REGION_SELECTOR =
+  "header, footer, nav, aside, " +
+  "[role='banner'], [role='contentinfo'], [role='navigation'], [role='complementary']";
+
+const TIER_TOP = 0; // 正文区域内
+const TIER_PLAIN = 1; // 无区域标记（与引入排序前的行为一致）
+const TIER_PERIPHERAL = 2; // 边缘区域内
+
+// 判档：自宿主自身起沿祖先链上行，逐级先试正文再试边缘，首个命中即返回——
+// 这就是「最近祖先胜出」（main > nav 判边缘，aside > article 判正文）。
+// 走链而非两次 closest 比深度，也使判档与传入的子树 root 无关（root 以上的标记不会丢）。
+function regionTier(el) {
+  let cur = el;
+  while (cur && cur.nodeType === 1) {
+    if (cur.matches(TOP_REGION_SELECTOR)) return TIER_TOP;
+    if (cur.matches(PERIPHERAL_REGION_SELECTOR)) return TIER_PERIPHERAL;
+    cur = cur.parentElement;
+  }
+  return TIER_PLAIN;
+}
+
 // 近似判断"内部还有更深的安全块"用的常见块级标签集。
 // 命中则下探（宿主选更深、粒度更细）；漏判则宿主偏大（粒度粗），
 // 误判代价仅为 payload 更小——偏保守的通用集合即可。
@@ -155,7 +179,11 @@ function createHostDiscovery(env) {
     }
 
     for (const child of start.children) visit(child); // root/body 自身不作宿主
-    return hosts.map((el) => ({ el: el, html: snapshotHtml(el) }));
+    // 按档位稳定排序：正文先占满并发池，边缘区域排到队尾；档内保持文档序
+    // （ES2019 起 sort 稳定，无需额外记下标）。排序只改请求次序，不改译文位置。
+    return hosts
+      .map((el) => ({ el: el, html: snapshotHtml(el), tier: regionTier(el) }))
+      .sort((a, b) => a.tier - b.tier);
   }
 
   return { isVisible, nonCodeText, qualifiesAsHost, snapshotHtml, discoverEntries };

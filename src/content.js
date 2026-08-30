@@ -41,6 +41,9 @@ function createContentSession(env) {
       const entries = hostDiscovery.discoverEntries();
       const limit = cfg.concurrency || 20;
       if (initial) {
+        // 分档统计：排序是纯时序行为，页面上看不出——没这行无法确认排序真的生效
+        const tiers = [0, 0, 0];
+        for (const e of entries) tiers[e.tier]++;
         DBG.debug(
           "session start:",
           entries.length,
@@ -48,6 +51,8 @@ function createContentSession(env) {
           entries.reduce((n, e) => n + e.html.length, 0),
           "chars, concurrency",
           limit,
+          ", tiers",
+          tiers.join("/"),
         );
       } else {
         DBG.debug("rescan:", entries.length, "new hosts");

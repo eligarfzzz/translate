@@ -419,3 +419,79 @@ test("净化: 媒体元素整个移除（svg/img/video/canvas 等，与输入侧
   assert.ok(out.includes("keep"));
   assert.ok(out.includes("see"));
 });
+
+// ============ 10. 区域分档与排序（翻译优先级：只改请求次序） ============
+
+test("分档: main 内宿主判正文档（0）", () => {
+  const { hd, doc } = makeEnv(`<main ${B}><p ${B}>main prose text</p></main>`);
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].tier, 0);
+});
+
+test("分档: 无标记宿主判未标记档（1）", () => {
+  const { hd, doc } = makeEnv(`<div ${B}><p ${B}>plain prose text</p></div>`);
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].tier, 1);
+});
+
+test("分档: footer 内宿主判边缘档（2）", () => {
+  const { hd, doc } = makeEnv(`<footer ${B}><p ${B}>footer prose text</p></footer>`);
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].tier, 2);
+});
+
+test("分档: 宿主自身即边缘标记 → 边缘档（自身参与判定）", () => {
+  const { hd, doc } = makeEnv(`<nav ${B}>navigation prose text</nav>`);
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].el.tagName, "NAV");
+  assert.equal(entries[0].tier, 2);
+});
+
+test("分档: main > nav 判边缘档——最近祖先胜出", () => {
+  const { hd, doc } = makeEnv(
+    `<main ${B}><nav ${B}><p ${B}>table of contents link text</p></nav></main>`,
+  );
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].tier, 2);
+});
+
+test("分档: aside > article 判正文档——最近祖先胜出（反向）", () => {
+  const { hd, doc } = makeEnv(
+    `<aside ${B}><article ${B}><p ${B}>sidebar article prose</p></article></aside>`,
+  );
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].tier, 0);
+});
+
+test("分档: role 与标签等效（div role=navigation → 边缘档）", () => {
+  const { hd, doc } = makeEnv(
+    `<div role="navigation" ${B}><p ${B}>menu entry prose text</p></div>`,
+  );
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].tier, 2);
+});
+
+test("排序: 正文→未标记→边缘，档内保持文档序", () => {
+  const { hd, doc } = makeEnv(
+    `<footer ${B}><p ${B}>footer prose text</p></footer>` +
+      `<div ${B}><p ${B}>unmarked prose text</p></div>` +
+      `<main ${B}><p ${B}>main first prose</p><p ${B}>main second prose</p></main>`,
+  );
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 4);
+  assert.deepEqual(
+    entries.map((e) => e.tier),
+    [0, 0, 1, 2],
+  );
+  assert.ok(entries[0].html.includes("main first"));
+  assert.ok(entries[1].html.includes("main second"));
+  assert.ok(entries[2].html.includes("unmarked"));
+  assert.ok(entries[3].html.includes("footer"));
+});

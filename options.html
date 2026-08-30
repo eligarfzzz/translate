@@ -27,17 +27,28 @@
         padding: 6px;
         font-family: inherit;
       }
-      .row {
-        display: flex;
-        gap: 12px;
-      }
-      .row > div {
-        flex: 1;
-      }
       button {
         margin-top: 16px;
         padding: 8px 16px;
         cursor: pointer;
+      }
+      /* TAB 条：未选中浅灰底，选中白底，选中项底边与面板连成一片 */
+      .tabs {
+        display: flex;
+        gap: 4px;
+        border-bottom: 1px solid #ccc;
+      }
+      .tabs button {
+        margin-top: 0; /* 抵消全局 button { margin-top: 16px }，否则标签下沉 */
+        margin-bottom: -1px; /* 自身底边压在面板顶边上 */
+        padding: 6px 14px;
+        font: inherit;
+        border: 1px solid #ccc;
+        background: #f2f2f2;
+      }
+      .tabs button[aria-selected="true"] {
+        background: #fff;
+        border-bottom-color: #fff; /* 抹掉选中项下方的分隔线 */
       }
       #status {
         margin-left: 12px;
@@ -52,36 +63,87 @@
   </head>
   <body>
     <h1>页面翻译 · 设置</h1>
+    <!-- 所有 input/textarea 必须留在 #form 内部：切换 TAB 靠面板的 hidden 属性，字段绝不移出 form -->
     <form id="form">
-      <label>API 端点（OpenAI 兼容）<input name="apiBase" type="text" /></label>
-      <label>API 密钥<input name="apiKey" type="password" /></label>
-      <label>模型<input name="model" type="text" /></label>
-      <label>目标语言<input name="targetLang" type="text" /></label>
-      <div class="row">
-        <div>
-          <label
-            >并发上限（同时在途请求数）<input name="concurrency" type="number" min="1" step="1"
-          /></label>
-        </div>
+      <div class="tabs" role="tablist" aria-label="设置分组">
+        <button
+          type="button"
+          role="tab"
+          id="tab-api"
+          data-tab="api"
+          aria-controls="panel-api"
+          aria-selected="true"
+          tabindex="0"
+        >
+          API
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="tab-prompt"
+          data-tab="prompt"
+          aria-controls="panel-prompt"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          提示词
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="tab-general"
+          data-tab="general"
+          aria-controls="panel-general"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          通用
+        </button>
       </div>
-      <label
-        >提示词模板（必须包含 {host} 占位符）<textarea name="promptTemplate" rows="10"></textarea>
-      </label>
-      <p class="hint">
-        模板中 {host} 为单宿主骨架 HTML 占位符，{target} 为目标语言；模板缺失 {host}
-        时保存值将被忽略并回退默认。
-      </p>
+
+      <div role="tabpanel" id="panel-api" data-panel="api" aria-labelledby="tab-api">
+        <label>API 端点（OpenAI 兼容）<input name="apiBase" type="text" /></label>
+        <label>API 密钥<input name="apiKey" type="password" /></label>
+        <label>模型<input name="model" type="text" /></label>
+        <label
+          >并发上限（同时在途请求数）<input name="concurrency" type="number" min="1" step="1"
+        /></label>
+        <button type="button" data-restore="api">恢复默认</button>
+        <p class="hint">模型思考（thinking）始终关闭，不可配置。修改保存后，下一次翻译立即生效。</p>
+      </div>
+
+      <div role="tabpanel" id="panel-prompt" data-panel="prompt" aria-labelledby="tab-prompt" hidden>
+        <label
+          >提示词模板（必须包含 {host} 占位符）<textarea name="promptTemplate" rows="10"></textarea>
+        </label>
+        <button type="button" data-restore="prompt">恢复默认</button>
+        <p class="hint">
+          模板中 {host} 为单宿主骨架 HTML 占位符，{target} 为目标语言；模板缺失 {host}
+          时保存值将被忽略并回退默认。
+        </p>
+      </div>
+
+      <div
+        role="tabpanel"
+        id="panel-general"
+        data-panel="general"
+        aria-labelledby="tab-general"
+        hidden
+      >
+        <label>目标语言<input name="targetLang" type="text" /></label>
+        <button type="button" data-restore="general">恢复默认</button>
+        <button type="button" id="export-logs">导出日志</button>
+        <button type="button" id="clear-logs">清空日志</button>
+        <p class="hint">
+          运行日志本地落盘（chrome.storage.local，每通道最近 500
+          条，密钥自动脱敏）：翻译流程日志在网页控制台（勾选 Verbose），API 请求日志在扩展的 Service
+          Worker 控制台。
+        </p>
+      </div>
+
+      <!-- 保存与状态常驻面板外：一次提交写入全部 TAB 的字段，不随 TAB 切换 -->
       <button type="submit">保存</button>
-      <button type="button" id="restore">恢复默认</button>
-      <button type="button" id="export-logs">导出日志</button>
-      <button type="button" id="clear-logs">清空日志</button>
       <span id="status"></span>
-      <p class="hint">模型思考（thinking）始终关闭，不可配置。修改保存后，下一次翻译立即生效。</p>
-      <p class="hint">
-        运行日志本地落盘（chrome.storage.local，每通道最近 500
-        条，密钥自动脱敏）：翻译流程日志在网页控制台（勾选 Verbose），API 请求日志在扩展的 Service
-        Worker 控制台。
-      </p>
     </form>
     <script type="module" src="src/options.js"></script>
   </body>

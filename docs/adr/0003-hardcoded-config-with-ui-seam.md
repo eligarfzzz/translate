@@ -13,3 +13,9 @@ All API settings (endpoint, key, model, target language) are hardcoded in `confi
 ---
 
 **Evolved: `promptTemplate` is a plain default key — frozen-template users exist.** When the prompt template became an ordinary entry in the defaults table (ESM refactor, ticket 06), anyone who had *saved* the then-current default template in `chrome.storage.sync` before that change keeps overriding every future default with their stored copy — they are frozen on the old default. Anyone who never saved a template gets each new default automatically. Consequence for the future: changing the default template does not reach frozen users; to reach them they must clear the field on the options page (or remove the stored `config`). Affects only the template key; other keys whose defaults changed have the same property, but the template is the one likely to evolve.
+
+---
+
+**Evolved: the options page is TAB-grouped, and "恢复默认" became a per-group form fill.** The page now has three TABs (API / 提示词 / 通用), each with its own "恢复默认" button. That button fills only its own TAB's inputs with the in-code defaults and writes nothing; 保存 still writes every field of every TAB as one `config` blob, so the storage key remains a single whole-blob write from one place. The per-group scope is what forced the change: a group-scoped button that deleted the shared `config` key would reset the other TABs too.
+
+Two consequences for the note above. The escape hatch "(or remove the stored `config`)" no longer has any UI affordance — no button deletes the key, so that route is now DevTools-only. Worse, the intuitive gesture 提示词 → 恢复默认 → 保存 *freezes* the user onto today's default template, the exact state the note warns about, because it writes the default's literal text into storage. The un-freeze route is unchanged and remains the only one: clear the textarea, then 保存 (an empty string falls back to the default at runtime while `mergeConfigRaw` keeps showing it empty).
