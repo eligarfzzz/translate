@@ -420,6 +420,84 @@ test("净化: 媒体元素整个移除（svg/img/video/canvas 等，与输入侧
   assert.ok(out.includes("see"));
 });
 
+// ============ 6b. 净化：空白规范与空节点去除（工单 01） ============
+// 断言只落在函数外部行为：输入 HTML → 输出 HTML 字符串形态。
+
+function sanitizeWith(html, doc) {
+  return sanitizeHtml(html, doc);
+}
+
+test("空白: 块间纯空白节点删除，不残留空行/缩进空白", () => {
+  const { doc } = makeEnv("");
+  assert.equal(sanitizeWith("<p>a</p>\n\n<p>b</p>", doc), "<p>a</p><p>b</p>");
+});
+
+test("空白: 行内相邻两侧各保单空格（Hello <b>bold</b> 不粘连）", () => {
+  const { doc } = makeEnv("");
+  assert.equal(sanitizeWith("<p>alpha <b>bold</b> beta</p>", doc), "<p>alpha <b>bold</b> beta</p>");
+  assert.equal(
+    sanitizeWith("<p>Hello <b>bold</b> world</p>", doc),
+    "<p>Hello <b>bold</b> world</p>",
+  );
+});
+
+test("空白: 句间/词间空格保留（含中部空白不压缩、单空格文本保留）", () => {
+  const { doc } = makeEnv("");
+  assert.equal(sanitizeWith("<p>hello world</p>", doc), "<p>hello world</p>");
+  assert.equal(sanitizeWith("<p>First.  Second.</p>", doc), "<p>First.  Second.</p>");
+  assert.equal(sanitizeWith("<p>a  b</p>", doc), "<p>a  b</p>");
+  assert.equal(sanitizeWith("<p>Hello  \n\n  world</p>", doc), "<p>Hello  \n\n  world</p>");
+});
+
+test("空白: 实体空白清理——&nbsp;/&#10;/&#9;/&#x200B; 及零宽字符", () => {
+  const { doc } = makeEnv("");
+  assert.equal(sanitizeWith("<p>x</p>&nbsp;&#10;&#9;&#x200B;<p>y</p>", doc), "<p>x</p><p>y</p>");
+  assert.equal(sanitizeWith("<p>a\u00a0b</p>", doc), "<p>a&nbsp;b</p>");
+  assert.equal(sanitizeWith("<p> \u200B </p>", doc), "");
+  assert.equal(sanitizeWith("<p>a\u200Bb</p>", doc), "<p>a\u200Bb</p>");
+});
+
+test("空白: 空壳元素删除——块间 <div> </div>、<span>\n</span>、<p> </p>", () => {
+  const { doc } = makeEnv("");
+  assert.equal(
+    sanitizeWith("<p>one</p><div> </div><span>\n</span><p>two</p>", doc),
+    "<p>one</p><p>two</p>",
+  );
+  assert.equal(sanitizeWith("<p>a</p><p> </p><p>b</p>", doc), "<p>a</p><p>b</p>");
+});
+
+test("空白: 链式空壳自底向上清空——空 ul 内空 li 整体消失", () => {
+  const { doc } = makeEnv("");
+  assert.equal(sanitizeWith("<ul><li></li><li> </li></ul>", doc), "");
+});
+
+test("空白: 空表格结构保留（td/th/tr 空壳不塌陷）", () => {
+  const { doc } = makeEnv("");
+  assert.equal(
+    sanitizeWith("<table><tr><td></td><td> </td></tr></table>", doc),
+    "<table><tbody><tr><td></td><td></td></tr></tbody></table>",
+  );
+});
+
+test("空白: pre/code 内部换行缩进与注释原样（整棵子树豁免）", () => {
+  const { doc } = makeEnv("");
+  assert.equal(
+    sanitizeWith(`<pre><code>  keep  \n  indent\n</code></pre>`, doc),
+    `<pre><code>  keep  \n  indent\n</code></pre>`,
+  );
+});
+
+test("空白: void 元素 br 保留——模型用其表达的换行仍生效", () => {
+  const { doc } = makeEnv("");
+  assert.equal(sanitizeWith("<p>a<br>b</p>", doc), "<p>a<br>b</p>");
+});
+
+test("空白: 首个文本节点的前导空白照删不保（缩进不留屏）", () => {
+  const { doc } = makeEnv("");
+  assert.equal(sanitizeWith("<p>  hello world  </p>", doc), "<p>hello world</p>");
+  assert.equal(sanitizeWith("<p> \n  hello world\n</p>", doc), "<p>hello world</p>");
+});
+
 // ============ 10. 区域分档与排序（翻译优先级：只改请求次序） ============
 
 test("分档: main 内宿主判正文档（0）", () => {

@@ -78,6 +78,79 @@ test("协议: 流式 delta 直通剥标签纯文本预览，done 定稿净化写
   assert.equal(empty.textContent, "翻译失败: 未返回译文");
 });
 
+// ============================================================
+// 净化空结果 → 译文节点移除（工单 01 渲染联动）
+// ============================================================
+
+test("净化空结果: 回显全被清空时译文节点整节点移除，不留空壳容器", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<p ${B}>empty echo english host one</p>` +
+      `<p ${B}>kept echo english host two</p>` +
+      `<p ${B}>empty echo english host three</p>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 3);
+
+  // 首宿主：定稿回显为可整体清空的纯空白空壳链 → 净化后为空 → 节点移除
+  env.ports[0].deliver("<p> </p>");
+  env.ports[1].deliver("正常译文内容");
+  // 尾宿主：回显只有空白块空壳（模型输出的空行结构）→ 净化后同样为空
+  env.ports[2].deliver("<p>\n\n  \n</p><div> </div>");
+  await env.clock.settle();
+
+  const paras = env.body.querySelectorAll("p");
+  assert.equal(paras.length, 3, "三个宿主原文原样保留");
+  assert.equal(
+    paras[0].querySelectorAll(".translate-node").length,
+    0,
+    "空壳回显宿主：译文容器被移除，不留空壳",
+  );
+  assert.equal(
+    paras[1].querySelector(".translate-node").textContent,
+    "正常译文内容",
+    "正常回显宿主不受影响",
+  );
+  assert.equal(
+    paras[2].querySelectorAll(".translate-node").length,
+    0,
+    "空白回显宿主：无可见内容，同样移除译文容器",
+  );
+
+  // 无残留：无孤立译文容器、调度收敛
+  assert.equal(env.body.querySelectorAll(".translate-node").length, 1, "仅正常宿主有译文容器");
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "无在途计时器");
+});
+
+test("净化空结果: 宿主登记同步清除——页面内容更新后该宿主可被重新翻译", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>initial english host text</p>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 1);
+
+  env.ports[0].deliver("<p></p>"); // 定稿净化为空 → 译文容器移除
+  await env.clock.settle();
+  assert.equal(env.body.querySelectorAll(".translate-node").length, 0, "空回显译文容器被移除");
+  await env.clock.advance(600); // 容器移除触发的防抖到期收敛
+
+  // 宿主内容更新（新增子节点）→ 该宿主仍可再次发起请求并正常落译文
+  const host = env.body.querySelector("p");
+  host.insertAdjacentHTML("beforeend", ` <span ${B}>updated english content</span>`);
+  await env.clock.settle();
+  await env.clock.advance(500);
+  assert.equal(env.ports.length, 2, "登记清除后内容更新触发重新翻译（修复前红：登记残留则无请求）");
+
+  env.ports[1].deliver("更新的译文");
+  await env.clock.settle();
+  assert.equal(
+    env.body.querySelector(".translate-node").textContent,
+    "更新的译文",
+    "重新翻译的译文正常落容器",
+  );
+});
+
 test("并发池: 同时在途端口数不超过配置上限（超出的宿主排队等待）", async () => {
   const env = createContentSandbox({
     bodyHtml: [1, 2, 3, 4, 5].map((i) => `<p ${B}>english paragraph number ${i}</p>`).join(""),

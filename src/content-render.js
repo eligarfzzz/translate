@@ -58,9 +58,19 @@ function createRenderer({ doc, win, session }) {
     if (live(div, gen)) div.textContent = textOf(raw);
   }
 
-  // 定稿：净化后 innerHTML 写入（回显全文即译文）
+  // 定稿：净化后 innerHTML 写入（回显全文即译文）。净化结果为空（回显全被
+  // 清空）时整节点移除、不留空壳容器（spec: 渲染联动），并同步清掉该宿主的
+  // hostState 登记——页面上不再有它的译文，后续内容变化可再次翻译该宿主。
+  // 定时器此刻已被调用方（done 分支）停掉，无需在此处理。
   function renderFinal(div, body, gen) {
-    if (live(div, gen)) div.innerHTML = sanitizeHtml(body, doc);
+    if (!live(div, gen)) return;
+    const clean = sanitizeHtml(body, doc);
+    if (clean === "") {
+      session.hostState.delete(div.parentElement);
+      div.remove();
+      return;
+    }
+    div.innerHTML = clean;
   }
 
   // 错误标记：写在既有译文容器内（斜体红字），不新建节点
