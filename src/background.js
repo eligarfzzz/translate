@@ -113,8 +113,11 @@ chrome.runtime.onConnect.addListener((port) => {
       DBG.debug("host request done");
       safePost(port, { type: "done" });
     } catch (err) {
-      DBG.error("host request failed:", String(err?.message || err));
-      if (!ac.signal.aborted) {
+      if (ac.signal.aborted) {
+        // port 断开（还原/刷新/关页）导致的预期中止：降级为 debug，不再当错误刷屏
+        DBG.debug("host request aborted (port closed):", String(err?.message || err));
+      } else {
+        DBG.error("host request failed:", String(err?.message || err));
         safePost(port, { type: "error", message: String(err?.message || err) });
       }
     } finally {

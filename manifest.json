@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "页面翻译",
+  "name": "翻译",
   "version": "0.1.0",
   "description": "在右键菜单翻译整个网页，译文以插入方式显示在原文下方，支持流式输出。",
   "permissions": ["contextMenus", "activeTab", "storage"],
