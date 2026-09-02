@@ -151,6 +151,34 @@ test("净化空结果: 宿主登记同步清除——页面内容更新后该宿
   );
 });
 
+// ============================================================
+// 流式预览不做空白处理（工单 02：防流式跳闪语义回归）
+// ============================================================
+
+test("工单02: 流式预览原样上屏不做空白处理，定稿净化才清首尾（不粘连、防跳闪）", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>whitespace echo english host</p>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 1);
+
+  // 流式途中：带前导/尾部换行的回显原样上屏——预览期不 trim、不折叠
+  // （若预览就清理，文字会在流式期间跳闪，这正是 spec 禁止预览 trim 的原因）
+  const raw = "\n\n第一段\n  第二行\n";
+  env.ports[0].emit({ type: "delta", text: raw });
+  await env.clock.settle();
+  const node = env.body.querySelector(".translate-node");
+  assert.equal(node.textContent, raw, "流式预览不做空白处理：首尾换行原样显示");
+
+  // 定稿：stripHostWrapper 整体 trim + 净化闸门块边界清首尾 → 只剩正文，
+  // 文本节点中部换行保留（不压缩）
+  env.ports[0].emit({ type: "done" });
+  await env.clock.settle();
+  assert.equal(node.innerHTML, "第一段\n  第二行", "定稿清理首尾空白，中部换行保留");
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "无在途计时器");
+});
+
 test("并发池: 同时在途端口数不超过配置上限（超出的宿主排队等待）", async () => {
   const env = createContentSandbox({
     bodyHtml: [1, 2, 3, 4, 5].map((i) => `<p ${B}>english paragraph number ${i}</p>`).join(""),
