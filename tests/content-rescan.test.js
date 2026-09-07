@@ -490,3 +490,141 @@ test("入口唯一: 会话不自注册 onMessage，派发权只属加载器（�
   assert.deepEqual(reply, { ok: true }, "加载器派发的消息得到唯一回应");
   assert.equal(env.ports.length, 1, "一个宿主恰好一次请求（无重复派发）");
 });
+
+// ============================================================
+// 进度徽标（工单 01：模块与会话生命周期）——消息/端口输入 → 徽标 DOM 输出；
+// 断言只落在文档里的徽标元素上（文本/样式/挂载位置），不断言模块内部计数器
+// ============================================================
+
+test("徽标: 翻译消息路径会话开启成功后上屏，零态 0% 0/0(0)，样式内联硬编码", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>progress badge english host</p>`,
+  });
+  await env.send({ type: "translate" });
+
+  const badge = env.body.querySelector(".translate-progress");
+  assert.ok(badge, "会话开启成功后徽标上屏（修复前红：无徽标元素）");
+  assert.equal(env.body.querySelectorAll(".translate-progress").length, 1, "恰好一枚徽标");
+  assert.equal(badge.parentElement, env.body, "徽标挂在 document.body 下");
+  assert.equal(badge.textContent, "0% 0/0(0)", "零态文案；total=0 时百分比按 0 显示（不产 NaN）");
+
+  // 样式内联硬编码（不看外部样式表、不用 Shadow DOM）：fixed 右下角、半透明深底
+  // 浅字、小号等宽、圆角、pointer-events: none、最高档 z-index
+  assert.equal(badge.style.position, "fixed", "fixed 定位");
+  assert.equal(badge.style.right, "12px", "贴视口右下角");
+  assert.equal(badge.style.bottom, "12px", "贴视口右下角");
+  assert.equal(badge.style.zIndex, "2147483647", "最高档 z-index");
+  assert.equal(badge.style.backgroundColor, "rgba(20, 20, 20, 0.75)", "半透明深底");
+  assert.equal(badge.style.color, "rgb(238, 238, 238)", "浅字");
+  assert.equal(badge.style.fontSize, "12px", "小号字");
+  assert.ok(badge.style.fontFamily.includes("monospace"), "等宽数字字体");
+  assert.notEqual(badge.style.borderRadius, "", "圆角");
+  assert.equal(badge.style.pointerEvents, "none", "不拦截鼠标");
+  assert.equal(badge.shadowRoot, null, "不用 Shadow DOM");
+
+  env.ports[0].deliver("徽标测试译文");
+  await env.clock.settle();
+});
+
+test("徽标: 还原后随译文一起移除；再次翻译可重新挂载并回到零态", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>badge lifecycle english host</p>`,
+  });
+  await env.send({ type: "translate" });
+  assert.ok(env.body.querySelector(".translate-progress"), "翻译后徽标上屏");
+
+  env.ports[0].deliver("还原前译文");
+  await env.clock.settle();
+  await env.send({ type: "revert" });
+  assert.equal(env.body.querySelector(".translate-progress"), null, "还原后徽标从文档移除");
+  assert.equal(env.body.querySelectorAll(".translate-node").length, 0, "译文节点一并清除");
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "还原后调度清理干净");
+
+  // 再次翻译：徽标重新挂载（新元素、零态文案）
+  await env.send({ type: "translate" });
+  assert.equal(env.body.querySelectorAll(".translate-progress").length, 1, "再次翻译重新挂载");
+  assert.equal(
+    env.body.querySelector(".translate-progress").textContent,
+    "0% 0/0(0)",
+    "重挂载回到零态（计数已清零）",
+  );
+  env.ports[1].deliver("重挂载译文");
+  await env.clock.settle();
+});
+
+test("徽标: 会话已活跃时重复「翻译」不重复挂载（拒绝重入）", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>reentrant translate english host</p>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.body.querySelectorAll(".translate-progress").length, 1);
+
+  // 翻译进行中重复「翻译」：会话拒绝重入，徽标不重复挂载、不产生新请求
+  await env.send({ type: "translate" });
+  assert.equal(
+    env.body.querySelectorAll(".translate-progress").length,
+    1,
+    "在途重复翻译不重复挂载",
+  );
+  assert.equal(env.ports.length, 1, "在途重复翻译不产生新请求");
+
+  env.ports[0].deliver("重入测试译文");
+  await env.clock.settle();
+
+  // 会话已开启（翻译已结束但会话仍活跃）时重复「翻译」同样被拒
+  await env.send({ type: "translate" });
+  assert.equal(
+    env.body.querySelectorAll(".translate-progress").length,
+    1,
+    "会话活跃期重复翻译不重复挂载",
+  );
+  assert.equal(env.ports.length, 1, "会话活跃期重复翻译不产生新请求");
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0);
+});
+
+test("徽标: 页面只剩徽标可扫也不产生端口请求，挂载自身不排防抖", async () => {
+  const env = createContentSandbox({ bodyHtml: "" }); // 空页面：唯一可扫对象就是徽标自身
+  await env.send({ type: "translate" });
+
+  const badge = env.body.querySelector(".translate-progress");
+  assert.ok(badge, "空页面翻译：徽标仍上屏");
+  await env.clock.settle();
+  // 徽标挂载是自身注入物：不排防抖（修复前红：挂载被当成页面新内容排一轮防抖）
+  assert.equal(env.clock.pending(), 0, "徽标上屏不排防抖");
+
+  // 页面只剩徽标（body 无其他元素）：长时间推进不产生任何端口请求、调度收敛
+  await env.clock.advance(10000);
+  assert.equal(env.ports.length, 0, "徽标永不成为宿主（硬跳过），无请求端口");
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标: 自身 DOM 变化不触发重扫——文本/属性抖动不排防抖、不产生端口", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>badge jitter english host</p>`,
+  });
+  await env.send({ type: "translate" });
+  env.ports[0].deliver("抖动测试译文");
+  await env.clock.settle();
+  await env.clock.advance(600); // 放空既有防抖队列，拿干净基线
+
+  const badge = env.body.querySelector(".translate-progress");
+  assert.ok(badge, "徽标在屏");
+  assert.equal(env.ports.length, 1, "基线：无新请求");
+  assert.equal(env.clock.pending(), 0, "基线：无在途计时器");
+
+  // 徽标自身高频抖动（进度重渲染的文本替换 + class/style 属性变化）
+  // 均在扩展注入物忽略范围内：不排防抖（修复前红：属性变化被当页面变化排队）
+  for (let i = 0; i < 8; i++) {
+    badge.textContent = `0% 0/0(${i})`; // 模拟模块重渲染
+    badge.classList.toggle("jitter");
+    badge.style.opacity = i % 2 ? "0.9" : "1";
+    await env.clock.settle();
+    assert.equal(env.clock.pending(), 0, `第 ${i} 次徽标抖动后无防抖排队`);
+  }
+
+  await env.clock.advance(2000);
+  assert.equal(env.ports.length, 1, "徽标自身变化不产生任何新请求");
+  assert.equal(env.clock.pending(), 0, "调度收敛：无在途计时器");
+});

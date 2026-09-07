@@ -1,7 +1,8 @@
-// 会话装配：把四块职责接成一个会话；环境依赖显式注入，由加载器启动。
+// 会话装配：把五块职责接成一个会话；环境依赖显式注入，由加载器启动。
 // content-session（状态与生命周期）/ content-render（译文节点与动画）/
-// content-translate（端口流程与并发池，ADR-0005）/ content-observer（观察器与防抖）。
-// 依赖单向：session ← render / translate / observer，无环。
+// content-translate（端口流程与并发池，ADR-0005）/ content-observer（观察器与防抖）/
+// content-progress（进度徽标）。
+// 依赖单向：session ← render / translate / observer / progress，无环。
 import { getChannel } from "./debug.js";
 import { createHostDiscovery } from "./host-discovery.js";
 import { loadConfig } from "./config.js";
@@ -9,6 +10,7 @@ import { createSessionState } from "./content-session.js";
 import { createRenderer } from "./content-render.js";
 import { createTranslator } from "./content-translate.js";
 import { createScheduler } from "./content-observer.js";
+import { createProgressBadge } from "./content-progress.js";
 
 // 会话工厂：注入 document（页面文档）、chrome（扩展 API）、getComputedStyle（display 判定）
 function createContentSession(env) {
@@ -31,6 +33,9 @@ function createContentSession(env) {
   });
 
   const translator = createTranslator({ ext, session, renderer, DBG });
+
+  // 进度徽标：会话装配第五块，与 render/translate/observer 平级；计数收在模块内
+  const badge = createProgressBadge({ doc });
 
   // 一轮翻译：发现宿主 → 并发池内逐宿主独立请求（失败只影响该宿主）。
   // 空结果自然结束；页面静止且翻译全部结束后无在途计时器，调度收敛。
@@ -71,7 +76,8 @@ function createContentSession(env) {
   });
 
   async function translatePage() {
-    if (!session.open()) return; // 会话已开启或翻译进行中：拒绝重入
+    if (!session.open()) return; // 会话已开启或翻译进行中：拒绝重入（徽标也不重复挂载）
+    badge.show(); // 会话开启成功才上屏；计数接线在工单 02
     await runRound(true);
   }
 
@@ -82,6 +88,7 @@ function createContentSession(env) {
     session.close(); // 代号自增作废旧回调 + 会话关闭 + 在途端口逐一断开
     scheduler.stop(); // 摘观察器 + 清挂起的防抖
     renderer.clearRendered(); // 停动画 + 移除译文节点 + 清 hostState
+    badge.remove(); // 摘进度徽标（与译文节点同等待遇：还原移除一切注入物）
   }
 
   // 只导出不自注册：注册与派发权归加载器（同步注册消竞态）；此处再注册会造成双份监听

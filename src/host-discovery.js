@@ -21,10 +21,11 @@ const FLEX_GRID_RE = /^(-webkit-)?(inline-)?(flex|grid)$/;
 
 // 硬跳过区域：绝不成为宿主、绝不下探（其中内容也不会进入任何快照）。
 // 注意 pre/code 不在其列——它们随所属叶子宿主的 innerHTML 原样投喂给 LLM。
+// .translate-node / .translate-progress：扩展自身注入物，永不成为宿主。
 const HARD_SKIP_SELECTOR =
   "script, style, noscript, template, iframe, svg, math, canvas, video, audio, head, " +
   "textarea, input, select, option, [contenteditable='true'], [role='textbox'], " +
-  "[aria-hidden='true'], .translate-node";
+  "[aria-hidden='true'], .translate-node, .translate-progress";
 
 // 区域标记表：决定宿主的翻译优先级档位（只影响请求发起顺序，不影响译文位置）。
 // 标签与 role 等价——大量站点用 div role=navigation 而不写 <nav>，只认标签会漏掉一半。

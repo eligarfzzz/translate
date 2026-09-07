@@ -25,21 +25,28 @@ function createScheduler({ doc, win, session, runRescan }) {
     }, RESCAN_DEBOUNCE_MS);
   }
 
+  // 扩展注入物选择器表：译文节点与进度徽标同等待遇（永不成为重扫触发源）。
+  // 各自比对（added 判定、属性变化判定）都经 closest 走同一张表——
+  // 子树内新增/属性变化同样被滤（徽标每次重渲染都改 DOM，不滤则每次
+  // 进度跳动都白排一轮防抖）；两表与 host-discovery 的硬跳过表手动同步。
+  const INJECTED_SELECTOR = ".translate-node, .translate-progress";
+  const isInjected = (el) => el.nodeType === win.Node.ELEMENT_NODE && el.closest(INJECTED_SELECTOR);
+
   function start() {
     if (observer) return;
     observer = new win.MutationObserver((mutations) => {
       if (!session.isActive()) return;
       for (const m of mutations) {
         if (m.type === "attributes") {
-          // 位于译文容器子树内（含容器自身）的属性变化忽略：自身注入物不触发重扫
+          // 位于扩展注入物子树内（含其自身）的属性变化忽略：不触发重扫
           const t = m.target;
-          if (t.nodeType === win.Node.ELEMENT_NODE && t.closest(".translate-node")) continue;
+          if (isInjected(t)) continue;
           scheduleScan();
           return;
         }
         for (const n of m.addedNodes) {
           if (n.nodeType === win.Node.ELEMENT_NODE) {
-            if (n.classList?.contains("translate-node")) continue; // 自身注入物
+            if (isInjected(n)) continue; // 自身注入物（.translate-node / .translate-progress）
             scheduleScan();
             return;
           }

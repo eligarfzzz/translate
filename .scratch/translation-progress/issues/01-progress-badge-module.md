@@ -4,13 +4,17 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 翻译消息路径会话开启成功后徽标上屏，零态文本为 `0% 0/0(0)`（total=0 时百分比按 0，不产 NaN）
-- [ ] 徽标 fixed 定位视口右下角、半透明深底、等宽小号字、`pointer-events: none`、最高档 z-index，样式内联硬编码
-- [ ] 点「还原」后徽标从文档移除；再次点「翻译」可重新挂载
-- [ ] 会话已活跃时重复「翻译」消息不重复挂载徽标
-- [ ] 徽标元素及其子树永不成为宿主（页面只剩徽标可扫时也不产生端口请求）
-- [ ] 徽标自身 DOM 变化不触发重扫（不排防抖、不产生额外端口）
-- [ ] 沙箱集成测试先红后绿，沿用 content-sandbox 既有夹具（消息/端口输入 → DOM 输出），不断言模块内部计数器，不改既有用例
-- [ ] `npm test` 全绿（lint + 既有用例 + 新用例）
+- [x] 翻译消息路径会话开启成功后徽标上屏，零态文本为 `0% 0/0(0)`（total=0 时百分比按 0，不产 NaN）
+- [x] 徽标 fixed 定位视口右下角、半透明深底、等宽小号字、`pointer-events: none`、最高档 z-index，样式内联硬编码
+- [x] 点「还原」后徽标从文档移除；再次点「翻译」可重新挂载
+- [x] 会话已活跃时重复「翻译」消息不重复挂载徽标
+- [x] 徽标元素及其子树永不成为宿主（页面只剩徽标可扫时也不产生端口请求）
+- [x] 徽标自身 DOM 变化不触发重扫（不排防抖、不产生额外端口）
+- [x] 沙箱集成测试先红后绿，沿用 content-sandbox 既有夹具（消息/端口输入 → DOM 输出），不断言模块内部计数器，不改既有用例
+- [x] `npm test` 全绿（lint + 既有用例 + 新用例）
+
+## Comments
+
+2026-09（ticket 01）：新增 src/content-progress.js（进度徽标工厂，会话装配第五块：show/addHosts/settled/remove，计数与文案收在模块内部，样式内联硬编码）。content.js 接线：translatePage 会话开启成功后 badge.show()（拒绝重入时 path 不到）、revertPage 增 badge.remove()。自排除：host-discovery 硬跳过表追加 .translate-progress；content-observer 注入物过滤统一为 .translate-node, .translate-progress（added 判定与属性判定共用）。5 个沙箱集成用例先红后绿（无徽标元素 → 徽标 DOM 断言），断言只落在文档里的徽标元素上，不断言内部计数器，不改既有用例；全量测试 127/127 全绿。addHosts/settled 接线留待 ticket 02。
