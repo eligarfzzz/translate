@@ -122,10 +122,12 @@
         <label
           >提示词模板（必须包含 {host} 占位符）<textarea name="promptTemplate" rows="10"></textarea>
         </label>
+        <label>追加提示词<textarea name="extra" rows="4"></textarea></label>
         <button type="button" data-restore="prompt">恢复默认</button>
         <p class="hint">
-          模板中 {host} 为单宿主骨架 HTML 占位符，{target} 为目标语言；模板缺失 {host}
-          时保存值将被忽略并回退默认。
+          留空使用内置默认模板；填写内容必须包含 {host}，否则保存时视为留空。模板中 {host}
+          为单宿主骨架 HTML 占位符，{target} 为目标语言。追加提示词的内容插到模板中 {extra}
+          的位置（多行可用）；模板里没写 {extra} 时它不生效。
         </p>
       </div>
 

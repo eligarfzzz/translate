@@ -46,10 +46,15 @@ _Avoid_: 次要区域, chrome, boilerplate, 不翻区域
 The order in which discovered hosts enter the 并发池: 正文区域 hosts first, unmarked hosts next, 边缘区域 hosts last. A host's tier is decided by the **nearest** marked ancestor, starting from the host itself — so `main > nav` is peripheral and `aside > article` is main content. Within one tier, document order is preserved. Priority is a property of when a host is _requested_, never of where its 译文节点 lands.
 _Avoid_: 排序, 权重, 打分, 区域过滤
 
+**进度徽标 (Progress Badge)**:
+A viewport-fixed overlay at the bottom-right corner showing live session progress: `<pct>% <done>/<total>(<totalAll>)(<errors>)`. The fraction counts only hosts outside 边缘区域 (tiers 0/1), so the percentage tracks main-content progress and can never exceed 100%; `<totalAll>` counts every discovered host including 边缘区域; the `<errors>` bracket is shown only while at least one host request (any tier) has failed. The percentage floors. The badge appears on Translate, stays at 100% as the completion signal, and 还原 removes it. As an injected element it never becomes a 宿主 and never triggers a rescan.
+_Avoid_: progress bar, status bar, spinner（那是 加载动画）
+
 ## Rules
 
-- **译文节点 is the only mutation.** Translation never modifies, replaces, or removes original page content; it only inserts translation nodes at host boundaries.
+- **译文节点 and 进度徽标 are the only mutations.** Translation never modifies, replaces, or removes original page content; it only inserts translation nodes at host boundaries, plus the single 进度徽标 overlay. Injected elements never become 宿主 and never trigger rescans.
 - **One node per host.** A host has exactly one translation node, holding its entire translation; no temporary streaming residue may remain in the DOM.
-- **Revert removes only translation nodes.** The original DOM must be exactly as it was before translation.
+- **Revert removes every injected element.** All 译文节点 and the 进度徽标 are removed; the original DOM must be exactly as it was before translation.
 - **翻译优先级 only reorders requests.** Sorting by priority changes the order hosts are sent to the endpoint, never the position of any 译文节点 and never the page layout. Every discovered host is still translated; no tier is skipped.
 - **Requests are independent.** A failed request shows an italic error message in that host's translation node; every other host still completes.
+- **空即未设置 (Empty Means Unset).** An empty config field is unset, not a value: 保存 rewrites the whole `config` blob, so an empty field's key is deleted (an all-empty form deletes the `config` key itself); reading starts from the full defaults and overlays only the non-empty stored values; the options page shows an empty box whose placeholder is the field's default — for a field with a non-empty default the placeholder is that default itself (in string form), while an empty-string default may carry a descriptive fake example instead (the three zero-trace API fields do); examples are optional field knowledge, not a required companion of an empty default. 「恢复默认」 = 清空 + 保存 = 删键 — clicking it only clears the group's inputs, and the following 保存 deletes those keys, so the group keeps following the version default instead of freezing on the default of the day. Emptiness is decided per default-value type (string / positive integer / template containing `{host}`) by the config module's single normalization entry point (`sanitizeStored`); no other component may decide it.

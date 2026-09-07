@@ -1,11 +1,17 @@
-// 配置页逻辑：TAB 分组 → 回填 → 保存（sync 存储）/ 按组恢复默认 / 日志导出
+// 配置页逻辑：TAB 分组 → 回填（值 + 占位文字由配置模块给出）→ 保存（sync 存储）/ 按组恢复默认（= 清空）/ 日志导出
 import { getChannel } from "./debug.js";
-import { loadConfigRaw, TRANSLATE_CONFIG } from "./config.js";
+import {
+  TRANSLATE_CONFIG,
+  loadStoredConfig,
+  pruneConfig,
+  isMissingHostPlaceholder,
+  placeholderText,
+} from "./config.js";
 
 // 分组表是唯一事实来源：TAB 归属、恢复默认的作用域、FIELDS 全部由它派生，避免两处清单漂移
 const GROUPS = {
   api: { label: "API", fields: ["apiBase", "apiKey", "model", "concurrency"] },
-  prompt: { label: "提示词", fields: ["promptTemplate"] },
+  prompt: { label: "提示词", fields: ["promptTemplate", "extra"] },
   general: { label: "通用", fields: ["targetLang"] },
 };
 const FIELDS = Object.values(GROUPS).flatMap((g) => g.fields);
@@ -20,39 +26,67 @@ function flash(msg) {
   }, 2500);
 }
 
-async function fillForm() {
-  // UI 回填语义：保存什么读什么（空值显示为空，而非默认）
-  const cfg = await loadConfigRaw(chrome.storage);
+// 空框占位：占位文字（默认值本身 / 空串默认值字段的示例）由配置模块给出，运行时注入、
+// 不写进 HTML；一视同仁——不区分该字段是否已设置，有值时占位本就不显示
+function fillPlaceholders() {
   for (const f of FIELDS) {
-    if (form.elements[f]) form.elements[f].value = cfg[f];
+    const el = form.elements[f];
+    if (!el) continue;
+    el.placeholder = placeholderText(f);
+  }
+}
+
+async function fillForm() {
+  // 回填：只显示存储中真实存在的非空值；未设置的字段留空（空即未设置），由占位显示将生效的默认值
+  const stored = await loadStoredConfig(chrome.storage);
+  for (const f of FIELDS) {
+    if (form.elements[f]) form.elements[f].value = stored[f] ?? "";
   }
 }
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const stored = {};
-  for (const f of FIELDS) stored[f] = form.elements[f].value;
-  await chrome.storage.sync.set({ config: stored });
-  DBG.debug("config saved (keys):", FIELDS.join(", "));
-  const tpl = stored.promptTemplate || "";
-  flash(
-    tpl && !tpl.includes("{host}")
-      ? "已保存，但提示词模板缺 {host}，将回退默认"
-      : "已保存 ✓ 下一次翻译生效",
-  );
+  const formValues = {};
+  for (const f of FIELDS) formValues[f] = form.elements[f].value;
+  // 模板非空但缺 {host}：与「模板为空」区分，给专门文案；判定函数与归一化同源（配置模块）
+  const templateDropped = isMissingHostPlaceholder("promptTemplate", formValues.promptTemplate);
+  // 反馈口径：基准是写入之前的归一化存储——只有真正被清掉的旧键才算「已删除设置」，
+  // 从未设置过的字段（含存储里本就没有的键）不在其中。基准取归一化后的存储：存储里的
+  // 非法值（并发 -1、缺 {host} 的模板）本来就没生效，清掉它不算删除设置（空即未设置）
+  const before = await loadStoredConfig(chrome.storage);
+  // 空即未设置：空字段不进载荷；全空时删除 config 键本身（整包重写天然清掉旧键）
+  const payload = pruneConfig(TRANSLATE_CONFIG, formValues);
+  const keys = Object.keys(payload);
+  if (keys.length) await chrome.storage.sync.set({ config: payload });
+  else await chrome.storage.sync.remove("config");
+  DBG.debug("config saved (keys):", keys.join(", ") || "(none: config removed)");
+  const cleared = Object.keys(before).filter((k) => !Object.hasOwn(payload, k)).length;
+  if (templateDropped) {
+    // 专门文案只说模板；其余被清掉的旧键另行计数，不被它吞掉。存储里确实存着模板时才减 1
+    // （它已由专门文案报过）——存储里本没有模板则它不在 cleared 里，写死减 1 会造出负数
+    const templateItself = Object.hasOwn(before, "promptTemplate") ? 1 : 0;
+    const others = cleared - templateItself;
+    const extraNote = others ? `；另有 ${others} 项为空，已删除设置、回退默认` : "";
+    flash(`已保存 ✓ 提示词模板缺 {host}，视为留空未保存，将使用内置默认模板${extraNote}`);
+  } else if (cleared) {
+    flash(`已保存 ✓ 下一次翻译生效；其中 ${cleared} 项为空，已删除设置、回退默认`);
+  } else {
+    flash("已保存 ✓ 下一次翻译生效");
+  }
 });
 
-// 按组恢复默认：只把该组输入框填成默认值，不写存储、不碰其他组字段（点保存才落盘）
+// 按组恢复默认 = 清空该组输入框（占位随即显示将生效的默认值）：不写存储、不碰其他组字段，
+// 点保存才落盘——落盘即删键，该组从此永远跟随版本默认，而不是被冻结在当前这一版默认上
 for (const btn of document.querySelectorAll("[data-restore]")) {
   btn.addEventListener("click", () => {
     const name = btn.dataset.restore;
     const group = GROUPS[name];
     if (!group) return;
     for (const f of group.fields) {
-      if (form.elements[f]) form.elements[f].value = TRANSLATE_CONFIG[f];
+      if (form.elements[f]) form.elements[f].value = "";
     }
-    DBG.debug("group restored to defaults (not saved):", name);
-    flash(`已恢复「${group.label}」默认值，点保存生效`);
+    DBG.debug("group cleared (not saved):", name);
+    flash(`已清空「${group.label}」，将使用默认值，点保存生效`);
   });
 }
 
@@ -101,4 +135,5 @@ document.getElementById("clear-logs").addEventListener("click", async () => {
   flash("日志已清空");
 });
 
+fillPlaceholders();
 fillForm();

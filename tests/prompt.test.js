@@ -1,5 +1,6 @@
 // 宿主即请求（ADR-0005）：renderPrompt 渲染测试——{host} 注入、换行保留、占位符校验；
-// HTML 包装协议（输入包 <html>，输出剥最外层）
+// HTML 包装协议（输入包 <html>，输出剥最外层）；
+// 追加提示词 {extra} 接缝：按行定位的插入点、字面保留、单遍替换（注入值不再被二次扫描）
 import { test } from "node:test";
 import assert from "node:assert";
 
@@ -28,6 +29,70 @@ test("不传 vars 时 {target} 保留原文（文档化行为：由调用方决�
   const out = renderPrompt("Translate into {target}.\n{host}", "x");
   assert.ok(out.includes("{target}"), "{target} left intact without vars");
   assert.ok(out.includes("x"));
+});
+
+test("未知占位符原样保留（vars 里没有对应键，如 {entries}）", () => {
+  const out = renderPrompt("Translate {entries} into {target}.\n{host}", "x", { target: "中文" });
+  assert.ok(out.includes("{entries}"), "无对应值的占位符原样保留");
+  assert.ok(out.includes("中文"), "{target} 照常替换");
+  assert.ok(out.includes("<html>x</html>"), "{host} 照常包装注入");
+});
+
+// ---------------- 追加提示词 {extra} 接缝：插入点、字面保留、单遍替换 ----------------
+
+const templateLines = () => DEFAULT_PROMPT_TEMPLATE.split("\n");
+const lineStartingWith = (prefix) => templateLines().findIndex((line) => line.startsWith(prefix));
+
+// 按行定位：默认模板的 {extra} 独占一行，紧接「Output exactly one …」之后、「Example: …」之前
+// （断言的是位置关系，不写死整篇模板文本）
+test("默认模板: {extra} 裸占位符独占一行，位于 Output… 行与 Example… 行之间", () => {
+  const lines = templateLines();
+  const extraLine = lines.indexOf("{extra}");
+  const outputLine = lineStartingWith("Output exactly one translated copy of that fragment.");
+  const exampleLine = lineStartingWith("Example: Input:");
+  assert.notEqual(outputLine, -1, "前提：模板含「Output exactly one …」行");
+  assert.notEqual(exampleLine, -1, "前提：模板含「Example: …」行");
+  assert.notEqual(extraLine, -1, "模板含 {extra} 占位符");
+  assert.equal(extraLine, outputLine + 1, "{extra} 紧接在「Output exactly one …」之后");
+  assert.equal(exampleLine, extraLine + 1, "「Example: …」紧随 {extra} 行");
+  assert.equal(lines[extraLine], "{extra}", "裸占位符独占一行（前后无其他文字）");
+});
+
+test("默认模板渲染: 那一行变成追加提示词；不填时该行渲染为空行", () => {
+  const extraLine = templateLines().indexOf("{extra}");
+  const extra = "专有名词保留原文";
+
+  const filled = renderPrompt(DEFAULT_PROMPT_TEMPLATE, "<p>a</p>", { target: "中文", extra });
+  assert.equal(filled.split("\n")[extraLine], extra, "追加提示词渲染在 {extra} 所在行");
+  assert.equal(filled.includes("{extra}"), false, "无 {extra} 残留");
+
+  const blank = renderPrompt(DEFAULT_PROMPT_TEMPLATE, "<p>a</p>", { target: "中文", extra: "" });
+  assert.equal(blank.split("\n")[extraLine], "", "不填 → 该行渲染为空行（模板结构不变）");
+});
+
+test("字面保留: 追加提示词里的 {target}/{host}/{extra} 原样出现，与 vars 键序无关", () => {
+  const extra = "规则：{target} 保持原文；别把 {host} 当宿主；{extra} 也别展开";
+  // 两种键序都断言：字面保留必须由单遍替换保证，而不是「哪个键先替换」这种隐式顺序
+  for (const vars of [
+    { target: "中文", extra },
+    { extra, target: "中文" },
+  ]) {
+    const out = renderPrompt(DEFAULT_PROMPT_TEMPLATE, "<p>a</p>", vars);
+    assert.ok(out.includes(extra), "整段追加提示词原样出现（内部占位符一个都没被展开）");
+    assert.ok(out.includes("{target} 保持原文"), "{target} 字面保留");
+    assert.ok(out.includes("{host} 当宿主"), "{host} 字面保留");
+    assert.ok(out.includes("{extra} 也别展开"), "{extra} 字面保留");
+    assert.ok(out.includes("<html><p>a</p></html>"), "模板自身的 {host} 照常包装注入");
+  }
+});
+
+test("不再二次扫描: 宿主 HTML 里的字面 {target} 原样保留（单遍替换修掉的真问题）", () => {
+  const host = "<p>写 {target} 而不是中文</p>";
+  const out = renderPrompt(DEFAULT_PROMPT_TEMPLATE, host, { target: "中文", extra: "e" });
+  assert.ok(out.includes("<html>" + host + "</html>"), "宿主 HTML 原样注入（含字面 {target}）");
+  // 模板自身的 {target} 仍被替换：留下的是「注入值里的」那一个
+  assert.equal(out.split("{target}").length - 1, 1, "全文只剩宿主里那一个 {target}");
+  assert.ok(out.includes("into 中文."), "模板里的 {target} 照常替换");
 });
 
 // ---- HTML 包装协议：输入带 <html> 包装，输出剥最外层 ----

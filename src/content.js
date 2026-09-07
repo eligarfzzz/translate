@@ -59,7 +59,8 @@ function createContentSession(env) {
       // 宿主发现出口按档计数（首轮与重扫共享同一出口，无第二条计数路径）：
       // 档 0+1 累加进度分母 translatable；全部宿主数（含档 2 边缘）累加括号 totalAll
       badge.addHosts(entries.filter((e) => e.tier < TIER_PERIPHERAL).length, entries.length);
-      const limit = cfg.concurrency || 20;
+      // 读路径已归一化：该字段恒为默认值表给出的正整数（空/非法值一律回退默认），无需再兜底
+      const limit = cfg.concurrency;
       if (initial) {
         // 分档统计：排序是纯时序行为，页面上看不出——没这行无法确认排序真的生效
         const tiers = [0, 0, 0];

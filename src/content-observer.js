@@ -1,6 +1,8 @@
 // 页面观察器与防抖调度：会话期内持续翻译新内容（SPA / 懒加载 / 折叠展开）；
 // 子节点新增与展开/显隐属性切换共用同一防抖入口，高频抖动不产生请求风暴。
 
+import { INJECTED_SELECTOR } from "./injected-selector.js";
+
 const RESCAN_DEBOUNCE_MS = 500;
 
 // 属性过滤器：只关注展开/显隐类切换；发现更多展开型属性扩充此表即可
@@ -28,8 +30,8 @@ function createScheduler({ doc, win, session, runRescan }) {
   // 扩展注入物选择器表：译文节点与进度徽标同等待遇（永不成为重扫触发源）。
   // 各自比对（added 判定、属性变化判定）都经 closest 走同一张表——
   // 子树内新增/属性变化同样被滤（徽标每次重渲染都改 DOM，不滤则每次
-  // 进度跳动都白排一轮防抖）；两表与 host-discovery 的硬跳过表手动同步。
-  const INJECTED_SELECTOR = ".translate-node, .translate-progress";
+  // 进度跳动都白排一轮防抖）；表来自单一来源（src/injected-selector.js），
+  // 与 host-discovery 的硬跳过表同用一份定义。
   const isInjected = (el) => el.nodeType === win.Node.ELEMENT_NODE && el.closest(INJECTED_SELECTOR);
 
   function start() {
@@ -46,7 +48,7 @@ function createScheduler({ doc, win, session, runRescan }) {
         }
         for (const n of m.addedNodes) {
           if (n.nodeType === win.Node.ELEMENT_NODE) {
-            if (isInjected(n)) continue; // 自身注入物（.translate-node / .translate-progress）
+            if (isInjected(n)) continue; // 自身注入物永不成为重扫触发源
             scheduleScan();
             return;
           }

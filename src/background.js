@@ -135,12 +135,12 @@ function safePost(port, msg) {
 async function streamTranslate(cfg, host, onDelta, signal) {
   // 骨架 HTML 不做空白压缩，保护缩进与结构；回显全文即译文（无标记协议）。
   const hostHtml = String(host).trim();
-  // 模板缺 {host} 时回退默认（透传的非空模板可能缺占位符，双保险）
+  // 归一化层已保证模板非空且含 {host}；这里只防绕过归一化的值让 renderPrompt 抛错（纵深防御）
   const template =
     cfg.promptTemplate && cfg.promptTemplate.includes("{host}")
       ? cfg.promptTemplate
       : DEFAULT_PROMPT_TEMPLATE;
-  const prompt = renderPrompt(template, hostHtml, { target: cfg.targetLang });
+  const prompt = renderPrompt(template, hostHtml, { target: cfg.targetLang, extra: cfg.extra });
   const url = `${cfg.apiBase}/chat/completions`;
   DBG.debug("upstream request:", url, "model:", cfg.model);
 

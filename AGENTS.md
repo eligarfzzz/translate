@@ -5,12 +5,12 @@ MV3 Chrome extension, **native ES modules, zero build** — the directory loaded
 ```
 manifest.json   MV3 清单（含 minimum_chrome_version: 106）
 options.html    配置页（单个 <script type="module"> 入口）
-src/            全部源文件（14 个，扁平，不按角色分子目录）
-tests/          node:test 套件（101 用例，jsdom 做 DOM 层）
+src/            全部源文件（16 个，扁平，不按角色分子目录）
+tests/          node:test 套件（177 用例，jsdom 做 DOM 层）
 docs/adr/       架构决策记录（0001–0006）
 ```
 
-内容脚本入口是 `src/content-loader.js`（classic，MV3 的 `content_scripts` 不支持模块类型）：它同步注册 `onMessage` 并缓冲，再动态 import `src/content.js`。会话逻辑拆为 `content-session` / `content-render` / `content-translate` / `content-observer` 四块，由 `content.js` 装配。
+内容脚本入口是 `src/content-loader.js`（classic，MV3 的 `content_scripts` 不支持模块类型）：它同步注册 `onMessage` 并缓冲，再动态 import `src/content.js`。会话逻辑拆为 `content-session` / `content-render` / `content-translate` / `content-observer` / `content-progress` 五块，由 `content.js` 装配。
 
 ```
 npm run lint       # eslint + prettier --check
