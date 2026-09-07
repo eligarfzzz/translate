@@ -1,0 +1,2 @@
+# 统一文本行尾为 LF：防止 CRLF 漂移导致 prettier --check 失败
+* text=auto eol=lf
