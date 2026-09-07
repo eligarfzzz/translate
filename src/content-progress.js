@@ -1,8 +1,8 @@
 // 进度徽标：会话期视口右下角的悬浮进度显示（会话装配第五块，与 render/translate/
 // observer 平级）。依赖单向、环境显式注入（document），jsdom 沙箱可直接驱动。
 // 计数与文案渲染全部收在模块内部，调用方只驱动四个方法：
-// show()（建节点上屏）/ addHosts(translatable, all)（本轮发现宿主进分母）/
-// settled(errored)（宿主流落定 +1）/ remove()（摘节点、计数清零）。
+// show()（建节点上屏）/ addHosts(translatable, all)（本轮发现宿主进分母与括号）/ settled(counted, errored)
+//   （宿主流落定：counted=是否计入分子，errored=是否计入错误）/ remove()（摘节点、计数清零）。
 // 徽标是扩展注入物，与译文节点同等待遇：class 被硬跳过选择器表（host-discovery）
 // 与观察器忽略表（content-observer）收录——自身永不成为宿主、不触发重扫。
 
@@ -53,9 +53,11 @@ function createProgressBadge({ doc }) {
       totalAll += all;
       render();
     },
-    // 宿主流落定：分子 +1；errored 为真时错误数 +1；计数变化即重渲染
-    settled(errored) {
-      done++;
+    // 宿主流落定：counted 为真时分子 +1（档 0+1 计入分子分母同口径，百分比不超
+    // 100%）；errored 为真时错误数 +1（错误括号为全档位口径：档 2 失败也计入，
+    // 但不进分子）。计数变化即重渲染
+    settled(counted, errored) {
+      if (counted) done++;
       if (errored) errors++;
       render();
     },

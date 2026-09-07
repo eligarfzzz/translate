@@ -104,6 +104,8 @@ function createClock() {
 //     ——可停在流式中途（只发部分 delta），再放行完成（补发 delta + done）
 //   • deliver(text)：便捷放行——回显全文一次 delta + done（无 [N] 标记协议）
 //   • disconnect() 只置标记，不回触发自身 onDisconnect（与真实端口一致）
+//   • disconnectUnexpectedly()：模拟连接意外中断（远端断开/管线破裂，非本方
+//     disconnect）——置断开并触发 onDisconnect 监听，会话侧据此走失败路径
 //   • hub 另维护在途端口数（未断开）与历史峰值：并发上限的观测量
 function createPortHub() {
   const ports = [];
@@ -116,6 +118,7 @@ function createPortHub() {
     peakInflight: 0,
     connect() {
       const msgListeners = [];
+      const disconnectListeners = [];
       const posted = [];
       active++;
       hub.peakInflight = Math.max(hub.peakInflight, active);
@@ -124,7 +127,7 @@ function createPortHub() {
         disconnected: false,
         posted,
         onMessage: { addListener: (fn) => msgListeners.push(fn) },
-        onDisconnect: { addListener: () => {} },
+        onDisconnect: { addListener: (fn) => disconnectListeners.push(fn) },
         postMessage: (msg) => {
           posted.push(msg);
         },
@@ -132,6 +135,12 @@ function createPortHub() {
           if (port.disconnected) return;
           port.disconnected = true;
           active--;
+        },
+        disconnectUnexpectedly: () => {
+          if (port.disconnected) return;
+          port.disconnected = true;
+          active--;
+          for (const fn of [...disconnectListeners]) fn();
         },
         emit: (msg) => {
           if (port.disconnected) return;

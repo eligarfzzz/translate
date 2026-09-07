@@ -496,7 +496,7 @@ test("入口唯一: 会话不自注册 onMessage，派发权只属加载器（�
 // 断言只落在文档里的徽标元素上（文本/样式/挂载位置），不断言模块内部计数器
 // ============================================================
 
-test("徽标: 翻译消息路径会话开启成功后上屏，零态 0% 0/0(0)，样式内联硬编码", async () => {
+test("徽标: 翻译消息路径会话开启成功后上屏，初始进度 0% 0/1(1)，样式内联硬编码", async () => {
   const env = createContentSandbox({
     bodyHtml: `<p ${B}>progress badge english host</p>`,
   });
@@ -506,7 +506,11 @@ test("徽标: 翻译消息路径会话开启成功后上屏，零态 0% 0/0(0)�
   assert.ok(badge, "会话开启成功后徽标上屏（修复前红：无徽标元素）");
   assert.equal(env.body.querySelectorAll(".translate-progress").length, 1, "恰好一枚徽标");
   assert.equal(badge.parentElement, env.body, "徽标挂在 document.body 下");
-  assert.equal(badge.textContent, "0% 0/0(0)", "零态文案；total=0 时百分比按 0 显示（不产 NaN）");
+  assert.equal(
+    badge.textContent,
+    "0% 0/1(1)",
+    "宿主进分母后的初始进度：发现出口按档计分母，1 宿主 → 0/1（total=0 的零态由空页面用例覆盖）",
+  );
 
   // 样式内联硬编码（不看外部样式表、不用 Shadow DOM）：fixed 右下角、半透明深底
   // 浅字、小号等宽、圆角、pointer-events: none、最高档 z-index
@@ -541,13 +545,13 @@ test("徽标: 还原后随译文一起移除；再次翻译可重新挂载并回
   await env.clock.advance(1000);
   assert.equal(env.clock.pending(), 0, "还原后调度清理干净");
 
-  // 再次翻译：徽标重新挂载（新元素、零态文案）
+  // 再次翻译：徽标重新挂载（新元素、计数已清零的初始进度文案）
   await env.send({ type: "translate" });
   assert.equal(env.body.querySelectorAll(".translate-progress").length, 1, "再次翻译重新挂载");
   assert.equal(
     env.body.querySelector(".translate-progress").textContent,
-    "0% 0/0(0)",
-    "重挂载回到零态（计数已清零）",
+    "0% 0/1(1)",
+    "重挂载回到初始进度（计数已清零：不残留上次的分子/分母/错误）",
   );
   env.ports[1].deliver("重挂载译文");
   await env.clock.settle();
@@ -627,4 +631,255 @@ test("徽标: 自身 DOM 变化不触发重扫——文本/属性抖动不排防
   await env.clock.advance(2000);
   assert.equal(env.ports.length, 1, "徽标自身变化不产生任何新请求");
   assert.equal(env.clock.pending(), 0, "调度收敛：无在途计时器");
+});
+
+// ============================================================
+// 进度徽标计数接线（工单 02）——宿主发现出口按档计数进分母/括号，
+// 端口流程 settle 唯一收口计数落定与错误（每宿主恰好一次，无第二条路径）
+// ============================================================
+
+test("徽标计数: 混合档位页分母排除边缘档、括号内为全部宿主数（正文 2 + 边缘 1 → 0/2(3)）", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<main ${B}><p ${B}>main prose english one</p><p ${B}>main prose english two</p></main>` +
+      `<footer ${B}><p ${B}>footer english line</p></footer>`,
+  });
+  await env.send({ type: "translate" });
+
+  // 3 个宿主全部发起请求（边缘档只排到队尾，仍会被翻译）
+  assert.equal(env.ports.length, 3, "正文 2 + 边缘 1 = 3 个端口请求");
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "0% 0/2(3)", "分母排除边缘档（档 2）宿主；括号内为全部宿主数");
+
+  env.ports[0].deliver("正文一译文");
+  env.ports[1].deliver("正文二译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 2/2(3)",
+    "正文两宿主全部落定 → 100%（边缘档未落定不拖累，也不计入分子）",
+  );
+
+  // 边缘档宿主落定：不计分子、不显示错误（决策：错误括号口径为全部档位）
+  env.ports[2].deliver("页脚译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 2/2(3)",
+    "边缘档落定不动分子——100% 是完成确认，不因队尾宿主上冲",
+  );
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标计数: 每宿主流落定分子 +1，百分比向下取整（1/3 → 33%，全落定才 100%）", async () => {
+  const env = createContentSandbox({
+    bodyHtml: [1, 2, 3].map((i) => `<p ${B}>progress english paragraph ${i}</p>`).join(""),
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 3);
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "0% 0/3(3)", "零态：分母 3");
+
+  env.ports[0].deliver("第一段译文");
+  await env.clock.settle();
+  assert.equal(badge.textContent, "33% 1/3(3)", "1/3 向下取整 → 33%");
+
+  env.ports[1].deliver("第二段译文");
+  await env.clock.settle();
+  assert.equal(badge.textContent, "66% 2/3(3)", "2/3 向下取整 → 66%");
+
+  env.ports[2].deliver("第三段译文");
+  await env.clock.settle();
+  assert.equal(badge.textContent, "100% 3/3(3)", "全部落定 → 100%");
+
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标计数: error 消息路径分子 +1、错误括号出现且计数正确；无错误时错误括号不显示", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<p ${B}>error path english host alpha</p>` +
+      `<p ${B}>error path english host beta</p>` +
+      `<p ${B}>error path english host gamma</p>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 3);
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "0% 0/3(3)", "无错误：无错误括号");
+
+  // error 消息路径：失败宿主也算落定（分子 +1），错误数 +1
+  env.ports[1].emit({ type: "error", message: "HTTP 500 boom" });
+  env.ports[0].deliver("甲译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "66% 2/3(3)(1)",
+    "error 路径计入分子与错误数：错误括号出现且计数正确",
+  );
+
+  env.ports[2].deliver("丙译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 3/3(3)(1)",
+    "含错误时进度仍可达 100%（出错的流也计入分子），错误数保持 1",
+  );
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标计数: 连接意外中断计错误；正常定稿落定无错误（无第二条计数路径）", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<p ${B}>disconnect english host alpha</p>` +
+      `<p ${B}>disconnect english host beta</p>` +
+      `<p ${B}>disconnect english host gamma</p>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 3);
+  const badge = env.body.querySelector(".translate-progress");
+
+  env.ports[0].deliver("甲译文");
+  await env.clock.settle();
+  assert.equal(badge.textContent, "33% 1/3(3)", "正常定稿落定：分子 +1、无错误括号");
+
+  // 连接意外中断（远端断开，非本方 disconnect）：计错误、分子 +1
+  env.ports[1].disconnectUnexpectedly();
+  await env.clock.settle();
+  assert.equal(badge.textContent, "66% 2/3(3)(1)", "连接中断算落定 + 错误（分子 +1、错误括号 +1）");
+
+  env.ports[2].deliver("丙译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 3/3(3)(1)",
+    "中断宿主计入分子：全部落定仍达 100%，错误数保持 1",
+  );
+
+  // 落定收口唯一性：settle 后再来消息/断开不重复计数
+  env.ports[0].emit({ type: "error", message: "late error" });
+  await env.clock.settle();
+  assert.equal(badge.textContent, "100% 3/3(3)(1)", "已落定端口的迟到消息不再计数");
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标计数: 空回显未返回译文算错误落定；净化空静默移除算落定不算错误、分子不回退", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<p ${B}>empty echo english host alpha</p>` +
+      `<p ${B}>empty echo english host beta</p>` +
+      `<p ${B}>empty echo english host gamma</p>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 3);
+  const badge = env.body.querySelector(".translate-progress");
+
+  // 空回显（零 delta 直接 done）：未返回译文 → 算落定（分子 +1）+ 错误 +1
+  env.ports[0].emit({ type: "done" });
+  await env.clock.settle();
+  assert.equal(badge.textContent, "33% 1/3(3)(1)", "空回显路径：分子 +1、错误括号出现");
+  assert.equal(
+    env.body.querySelectorAll("p")[0].querySelector(".translate-node").textContent,
+    "翻译失败: 未返回译文",
+  );
+
+  // 净化空结果（有回显但净化为空壳）：译文节点静默移除——算落定、不算错误
+  env.ports[1].deliver("<p> </p>");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "66% 2/3(3)(1)",
+    "净化空静默移除：算落定（分子 +1）、错误数不增（错误括号仍为 1）",
+  );
+  assert.equal(
+    env.body.querySelectorAll("p")[1].querySelectorAll(".translate-node").length,
+    0,
+    "净化空宿主译文容器被移除",
+  );
+
+  env.ports[2].deliver("丙译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 3/3(3)(1)",
+    "净化空宿主也计入分子：进度可达 100%；错误数保持 1",
+  );
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标计数: 边缘档宿主失败只进错误括号（全档位口径），不进分子分母", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<main ${B}><p ${B}>main prose english one</p><p ${B}>main prose english two</p></main>` +
+      `<nav ${B}><p ${B}>nav english link line</p></nav>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 3, "正文 2 + 边缘 1 = 3 个端口请求");
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "0% 0/2(3)", "分母 2、括号 3");
+
+  // 边缘档宿主（ports[2]，排序在队尾）error：只进错误括号，分子分母不动
+  env.ports[2].emit({ type: "error", message: "nav boom" });
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "0% 0/2(3)(1)",
+    "边缘档失败只使错误括号 +1，不进分子（错误口径含全部档位）",
+  );
+
+  env.ports[0].deliver("正文一译文");
+  env.ports[1].deliver("正文二译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 2/2(3)(1)",
+    "全落定且边缘失败：100% 仍可达，终态错误括号为 1",
+  );
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标计数: 重扫新增宿主后分母与括号同步增长（百分比可下降）", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<main ${B}><p ${B}>first wave english prose</p></main>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 1);
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "0% 0/1(1)", "首轮：分母 1");
+
+  env.ports[0].deliver("首轮译文");
+  await env.clock.settle();
+  assert.equal(badge.textContent, "100% 1/1(1)", "首轮全部落定");
+
+  // 页面动态新增宿主（正文 1 + 边缘 1）→ 防抖后重扫：分母与括号同步增长
+  env.body.insertAdjacentHTML(
+    "beforeend",
+    `<p ${B}>second wave english prose</p>` +
+      `<footer ${B}><p ${B}>second wave footer english</p></footer>`,
+  );
+  await env.clock.settle();
+  await env.clock.advance(500); // 防抖到期 → 重扫
+  assert.equal(env.ports.length, 3, "重扫新增 2 宿主 → 2 个新请求");
+
+  assert.equal(
+    badge.textContent,
+    "50% 1/2(3)",
+    "重扫后分母 1→2、括号 1→3（同步增长）；1/2 → 50%（百分比下降属预期）",
+  );
+
+  env.ports[1].deliver("二波正文译文");
+  env.ports[2].deliver("二波页脚译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 2/2(3)",
+    "重扫新增宿主全部落定后回到 100%（边缘档不计分子）",
+  );
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
 });

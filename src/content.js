@@ -12,6 +12,10 @@ import { createTranslator } from "./content-translate.js";
 import { createScheduler } from "./content-observer.js";
 import { createProgressBadge } from "./content-progress.js";
 
+// 翻译优先级档位（与 host-discovery 判档常量同值）：档 0 正文 / 档 1 未标记 /
+// 档 2 边缘区域。进度计数口径按此拆分（档 0+1 计入分子分母，档 2 只进括号）。
+const TIER_PERIPHERAL = 2;
+
 // 会话工厂：注入 document（页面文档）、chrome（扩展 API）、getComputedStyle（display 判定）
 function createContentSession(env) {
   const doc = env.document;
@@ -32,18 +36,29 @@ function createContentSession(env) {
     hostState: session.hostState,
   });
 
-  const translator = createTranslator({ ext, session, renderer, DBG });
-
   // 进度徽标：会话装配第五块，与 render/translate/observer 平级；计数收在模块内
   const badge = createProgressBadge({ doc });
 
-  // 一轮翻译：发现宿主 → 并发池内逐宿主独立请求（失败只影响该宿主）。
+  // 落定计数的唯一收口（端口流程 settle 每宿主恰好一次）：按档拆分口径——
+  // 档 0+1（正文/未标记）计入进度分子与分母；档 2（边缘区域）落定不计分子，
+  // 但失败仍进错误括号（错误括号为全档位口径）。errored 由端口流程给出：
+  // error 消息 / 空回显「未返回译文」/ 连接意外中断；净化为空的静默移除不算。
+  function settleHost(entry, errored) {
+    badge.settled(entry.tier < TIER_PERIPHERAL, errored);
+  }
+
+  const translator = createTranslator({ ext, session, renderer, DBG, onSettled: settleHost });
+
+  // 一轮翻译：发现宿主 → 按档计分母与括号 → 并发池内逐宿主独立请求（失败只影响该宿主）。
   // 空结果自然结束；页面静止且翻译全部结束后无在途计时器，调度收敛。
   async function runRound(initial) {
     session.beginTranslating();
     try {
       const cfg = await loadConfig(ext.storage);
       const entries = hostDiscovery.discoverEntries();
+      // 宿主发现出口按档计数（首轮与重扫共享同一出口，无第二条计数路径）：
+      // 档 0+1 累加进度分母 translatable；全部宿主数（含档 2 边缘）累加括号 totalAll
+      badge.addHosts(entries.filter((e) => e.tier < TIER_PERIPHERAL).length, entries.length);
       const limit = cfg.concurrency || 20;
       if (initial) {
         // 分档统计：排序是纯时序行为，页面上看不出——没这行无法确认排序真的生效
