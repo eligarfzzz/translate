@@ -665,8 +665,8 @@ test("徽标计数: 混合档位页分母排除边缘档、括号内为全部宿
   await env.clock.settle();
   assert.equal(
     badge.textContent,
-    "100% 2/2(3)",
-    "边缘档落定不动分子——100% 是完成确认，不因队尾宿主上冲",
+    "100% 2/2(3) 0(0)s",
+    "边缘档落定不动分子——100% 是完成确认，不因队尾宿主上冲；此刻全部落定 → 追加耗时读数（时钟未推进 → 0(0)s）",
   );
   await env.clock.advance(1000);
   assert.equal(env.clock.pending(), 0, "调度收敛");
@@ -691,7 +691,7 @@ test("徽标计数: 每宿主流落定分子 +1，百分比向下取整（1/3 �
 
   env.ports[2].deliver("第三段译文");
   await env.clock.settle();
-  assert.equal(badge.textContent, "100% 3/3(3)", "全部落定 → 100%");
+  assert.equal(badge.textContent, "100% 3/3(3) 0(0)s", "全部落定 → 100% 且追加耗时读数");
 
   await env.clock.advance(1000);
   assert.equal(env.clock.pending(), 0, "调度收敛");
@@ -723,8 +723,8 @@ test("徽标计数: error 消息路径分子 +1、错误括号出现且计数正
   await env.clock.settle();
   assert.equal(
     badge.textContent,
-    "100% 3/3(3)(1)",
-    "含错误时进度仍可达 100%（出错的流也计入分子），错误数保持 1",
+    "100% 3/3(3)(1) 0(0)s",
+    "含错误时进度仍可达 100%（出错的流也计入分子），错误数保持 1；全部落定后追加耗时读数",
   );
   await env.clock.advance(1000);
   assert.equal(env.clock.pending(), 0, "调度收敛");
@@ -754,14 +754,18 @@ test("徽标计数: 连接意外中断计错误；正常定稿落定无错误（
   await env.clock.settle();
   assert.equal(
     badge.textContent,
-    "100% 3/3(3)(1)",
-    "中断宿主计入分子：全部落定仍达 100%，错误数保持 1",
+    "100% 3/3(3)(1) 0(0)s",
+    "中断宿主计入分子：全部落定仍达 100%，错误数保持 1；追加耗时读数",
   );
 
   // 落定收口唯一性：settle 后再来消息/断开不重复计数
   env.ports[0].emit({ type: "error", message: "late error" });
   await env.clock.settle();
-  assert.equal(badge.textContent, "100% 3/3(3)(1)", "已落定端口的迟到消息不再计数");
+  assert.equal(
+    badge.textContent,
+    "100% 3/3(3)(1) 0(0)s",
+    "已落定端口的迟到消息不再计数（读数保持定格）",
+  );
   await env.clock.advance(1000);
   assert.equal(env.clock.pending(), 0, "调度收敛");
 });
@@ -804,8 +808,8 @@ test("徽标计数: 空回显未返回译文算错误落定；净化空静默移
   await env.clock.settle();
   assert.equal(
     badge.textContent,
-    "100% 3/3(3)(1)",
-    "净化空宿主也计入分子：进度可达 100%；错误数保持 1",
+    "100% 3/3(3)(1) 0(0)s",
+    "净化空宿主也计入分子：进度可达 100%；错误数保持 1；追加耗时读数",
   );
   await env.clock.advance(1000);
   assert.equal(env.clock.pending(), 0, "调度收敛");
@@ -836,8 +840,8 @@ test("徽标计数: 边缘档宿主失败只进错误括号（全档位口径）
   await env.clock.settle();
   assert.equal(
     badge.textContent,
-    "100% 2/2(3)(1)",
-    "全落定且边缘失败：100% 仍可达，终态错误括号为 1",
+    "100% 2/2(3)(1) 0(0)s",
+    "全落定且边缘失败：100% 仍可达，终态错误括号为 1；追加耗时读数",
   );
   await env.clock.advance(1000);
   assert.equal(env.clock.pending(), 0, "调度收敛");
@@ -854,7 +858,7 @@ test("徽标计数: 重扫新增宿主后分母与括号同步增长（百分比
 
   env.ports[0].deliver("首轮译文");
   await env.clock.settle();
-  assert.equal(badge.textContent, "100% 1/1(1)", "首轮全部落定");
+  assert.equal(badge.textContent, "100% 1/1(1) 0(0)s", "首轮全部落定并追加耗时读数（时钟未推进）");
 
   // 页面动态新增宿主（正文 1 + 边缘 1）→ 防抖后重扫：分母与括号同步增长
   env.body.insertAdjacentHTML(
@@ -877,9 +881,201 @@ test("徽标计数: 重扫新增宿主后分母与括号同步增长（百分比
   await env.clock.settle();
   assert.equal(
     badge.textContent,
-    "100% 2/2(3)",
-    "重扫新增宿主全部落定后回到 100%（边缘档不计分子）",
+    "100% 2/2(3) 0(0)s",
+    "重扫新增宿主全部落定后回到 100%（边缘档不计分子）；读数按同一沙箱时钟算（0.5s → 0s）",
   );
   await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+// ============================================================
+// 进度徽标计时（工单 bt-01）——全部已发现宿主（含边缘档）落定后，文案末尾追加
+// ` <主内容秒数>(<全内容秒数>)s`；时间源由沙箱以手动时钟注入（now: () => clock.now），
+// 推进沙箱时钟即推进读数。断言只落在徽标文案（可见结果）与调度观测（pending）上
+// ============================================================
+
+test("徽标计时: 括号外定格在正文落定时刻、括号内定格在全落定时刻（12s / 60s）", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<main ${B}><p ${B}>main prose english one</p><p ${B}>main prose english two</p></main>` +
+      `<nav ${B}><p ${B}>nav english link line</p></nav>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 3, "正文 2 + 边缘 1 = 3 个端口请求");
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "0% 0/2(3)", "在途：不显示时间后缀");
+
+  await env.clock.advance(12000); // 12s：正文两宿主落定
+  env.ports[0].deliver("正文一译文");
+  env.ports[1].deliver("正文二译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 2/2(3)",
+    "正文全部落定但边缘档仍在途：仍不显示时间（时间只在全部落定后出现）",
+  );
+
+  await env.clock.advance(48000); // 60s：边缘档落定
+  env.ports[2].deliver("导航译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 2/2(3) 12(60)s",
+    "括号外是正文落定时刻（12s）、括号内是全落定时刻（60s）——两个数各自定格",
+  );
+  assert.equal(env.clock.pending(), 0, "调度收敛：无在途计时器");
+});
+
+test("徽标计时: 全部落定后再推进时钟，文案逐字不变且无在途计时器（定格值不是秒表）", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>steady reading english host</p>`,
+  });
+  await env.send({ type: "translate" });
+  await env.clock.advance(3000);
+  env.ports[0].deliver("稳定读数译文");
+  await env.clock.settle();
+
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "100% 1/1(1) 3(3)s", "落定即定格 3 秒");
+  assert.equal(env.clock.pending(), 0, "落定后无在途计时器（徽标不装定时器）");
+
+  await env.clock.advance(5000);
+  assert.equal(badge.textContent, "100% 1/1(1) 3(3)s", "时钟走了 5 秒，读数逐字不变");
+  assert.equal(env.clock.pending(), 0, "推进 5 秒后仍无在途计时器");
+});
+
+test("徽标计时: 重扫发现新段落时读数撤下，新宿主落定后回来并继续累计", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<main ${B}><p ${B}>first wave main prose</p></main>`,
+  });
+  await env.send({ type: "translate" });
+  await env.clock.advance(2000);
+  env.ports[0].deliver("首轮译文");
+  await env.clock.settle();
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "100% 1/1(1) 2(2)s", "首轮全落定 → 定格 2 秒");
+
+  // 动态插入新段落 → 重扫发现：读数先撤下（不把过时旧值当当前耗时）
+  const main = env.body.querySelector("main");
+  main.insertAdjacentHTML("beforeend", `<p ${B}>second wave main prose</p>`);
+  await env.clock.settle();
+  await env.clock.advance(500); // 防抖到期 → 重扫
+  assert.equal(env.ports.length, 2, "重扫为新宿主发起请求");
+  assert.equal(badge.textContent, "50% 1/2(2)", "新宿主进分母即撤下时间读数");
+
+  await env.clock.advance(3000); // 5.5s：新宿主落定
+  env.ports[1].deliver("二轮译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 2/2(2) 5(5)s",
+    "读数回来且从同一起点继续累计（5s > 2s：隐藏期照常计时）",
+  );
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标计时: 只新增边缘档宿主时括号外保持旧定格值，括号内更新为更大的秒数", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<main ${B}><p ${B}>main prose english host</p></main>` +
+      `<footer ${B}><p ${B}>footer english line</p></footer>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 2, "正文 1 + 边缘 1 = 2 个端口请求");
+  await env.clock.advance(4000);
+  env.ports[0].deliver("正文译文");
+  env.ports[1].deliver("页脚译文");
+  await env.clock.settle();
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "100% 1/1(2) 4(4)s", "首轮全落定 → 4(4)s");
+
+  // 只新增边缘档宿主（footer 内新段落）：正文时间不解冻，全量落定时间解冻
+  const footer = env.body.querySelector("footer");
+  footer.insertAdjacentHTML("beforeend", `<p ${B}>late footer english line</p>`);
+  await env.clock.settle();
+  await env.clock.advance(500); // 防抖到期 → 重扫
+  assert.equal(env.ports.length, 3, "重扫为新宿主发起请求");
+  assert.equal(badge.textContent, "100% 1/1(3)", "括号增长、读数撤下（主内容分母不动）");
+
+  await env.clock.advance(5000); // 9.5s：新边缘宿主落定
+  env.ports[2].deliver("迟到页脚译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "100% 1/1(3) 4(9)s",
+    "括号外保持正文落定时的定格值 4s，括号内更新为全落定时刻 9s",
+  );
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标计时: 还原后再翻译时间从 0 重新起算（不残留上一次的读数）", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>restart timing english host</p>`,
+  });
+  await env.send({ type: "translate" });
+  await env.clock.advance(7000);
+  env.ports[0].deliver("首轮译文");
+  await env.clock.settle();
+  assert.equal(
+    env.body.querySelector(".translate-progress").textContent,
+    "100% 1/1(1) 7(7)s",
+    "首轮全落定 → 定格 7 秒",
+  );
+
+  await env.send({ type: "revert" });
+  await env.clock.advance(20000); // 还原后时钟继续走：不是暂停，而是重新起算
+
+  await env.send({ type: "translate" });
+  assert.equal(
+    env.body.querySelector(".translate-progress").textContent,
+    "0% 0/1(1)",
+    "重挂载回到零态：先没有读数",
+  );
+  env.ports[1].deliver("二轮译文");
+  await env.clock.settle();
+  assert.equal(
+    env.body.querySelector(".translate-progress").textContent,
+    "100% 1/1(1) 0(0)s",
+    "耗时从本次 show() 起算：不残留上一会话的 7s",
+  );
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标计时: 只有边缘档宿主的页面全落定后括号外为 0（空主内容集合视为起点即完成）", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<header ${B}><p ${B}>header english tagline</p></header>` +
+      `<nav ${B}><p ${B}>nav english link line</p></nav>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 2, "两个边缘档宿主各一次请求");
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "0% 0/0(2)", "主内容分母为 0；括号为全部宿主数");
+
+  await env.clock.advance(3000);
+  env.ports[0].deliver("页眉译文");
+  await env.clock.settle();
+  assert.equal(badge.textContent, "0% 0/0(2)", "边缘档仍在途 → 无时间后缀");
+
+  env.ports[1].deliver("导航译文");
+  await env.clock.settle();
+  assert.equal(
+    badge.textContent,
+    "0% 0/0(2) 0(3)s",
+    "全落定：括号外按 0 显示（不引入第三态），括号内为全落定时刻 3s",
+  );
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("徽标计时: 零宿主页面文案保持 0% 0/0(0)，永不出现时间后缀", async () => {
+  const env = createContentSandbox({ bodyHtml: "" }); // 零宿主：没有任何翻译发生过
+  await env.send({ type: "translate" });
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(badge.textContent, "0% 0/0(0)", "零宿主：无时间后缀");
+
+  await env.clock.advance(10000);
+  assert.equal(badge.textContent, "0% 0/0(0)", "时间流逝也不出现时间后缀（没有翻译发生过）");
+  assert.equal(env.ports.length, 0, "零宿主页面无请求");
   assert.equal(env.clock.pending(), 0, "调度收敛");
 });

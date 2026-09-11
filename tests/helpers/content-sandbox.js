@@ -214,7 +214,9 @@ function createContentSandbox({ bodyHtml = "", config = null } = {}) {
   // 会话若自注册 onMessage 只记录、不派发：非空即为「加载器 + 会话双份监听」回归
   const selfRegistered = [];
 
-  // 手动时钟接入注入文档所属 window：会话的动画与防抖计时器全部经此排队
+  // 手动时钟接入注入文档所属 window：会话的动画与防抖计时器全部经此排队；
+  // 同一时钟也作为会话的耗时时间源 now 注入（见下方 createContentSession），
+  // 使徽标读数与动画/防抖走同一个可精确推进的时钟
   dom.window.setTimeout = clock.setTimeout;
   dom.window.clearTimeout = clock.clearTimeout;
   dom.window.setInterval = clock.setInterval;
@@ -242,6 +244,9 @@ function createContentSandbox({ bodyHtml = "", config = null } = {}) {
     document: dom.window.document,
     chrome: chromeStub,
     getComputedStyle: (el) => dom.window.getComputedStyle(el),
+    // 时间读数接同一个手动时钟（与上方 setTimeout 接线同一理由）：会话的耗时
+    // 读数由沙箱时钟精确控制，推进时钟即推进秒数（真实环境为 Date.now）
+    now: () => clock.now,
   });
 
   // 沙箱扮演加载器：会话的 handleMessage 是唯一派发目标

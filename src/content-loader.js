@@ -19,6 +19,8 @@
         document,
         chrome,
         getComputedStyle: (el) => getComputedStyle(el),
+        // 时间源：徽标耗时读数（now() 差值）用真实时钟
+        now: () => Date.now(),
       });
       for (const { msg, sender, sendResponse } of pending.splice(0)) {
         session.handleMessage(msg, sender, sendResponse);

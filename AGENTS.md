@@ -6,7 +6,7 @@ MV3 Chrome extension, **native ES modules, zero build** — the directory loaded
 manifest.json   MV3 清单（含 minimum_chrome_version: 106）
 options.html    配置页（单个 <script type="module"> 入口）
 src/            全部源文件（16 个，扁平，不按角色分子目录）
-tests/          node:test 套件（177 用例，jsdom 做 DOM 层）
+tests/          node:test 套件（184 用例，jsdom 做 DOM 层）
 docs/adr/       架构决策记录（0001–0006）
 ```
 

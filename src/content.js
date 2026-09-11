@@ -16,7 +16,8 @@ import { createProgressBadge } from "./content-progress.js";
 // 档 2 边缘区域。进度计数口径按此拆分（档 0+1 计入分子分母，档 2 只进括号）。
 const TIER_PERIPHERAL = 2;
 
-// 会话工厂：注入 document（页面文档）、chrome（扩展 API）、getComputedStyle（display 判定）
+// 会话工厂：注入 document（页面文档）、chrome（扩展 API）、getComputedStyle（display 判定）、
+// now（时间源，返回毫秒：徽标耗时读数用）
 function createContentSession(env) {
   const doc = env.document;
   const ext = env.chrome;
@@ -36,8 +37,9 @@ function createContentSession(env) {
     hostState: session.hostState,
   });
 
-  // 进度徽标：会话装配第五块，与 render/translate/observer 平级；计数收在模块内
-  const badge = createProgressBadge({ doc });
+  // 进度徽标：会话装配第五块，与 render/translate/observer 平级；计数收在模块内，
+  // 时间源透传 env.now（真实环境 Date.now、测试沙箱手动时钟）
+  const badge = createProgressBadge({ doc, now: env.now });
 
   // 落定计数的唯一收口（端口流程 settle 每宿主恰好一次）：按档拆分口径——
   // 档 0+1（正文/未标记）计入进度分子与分母；档 2（边缘区域）落定不计分子，
