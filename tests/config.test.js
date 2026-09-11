@@ -1,4 +1,5 @@
 // 工单 01（empty-means-unset）：配置核心归一化——空即未设置。
+// 工单 01（session-reuse）：布尔字段（reuseSession）沿用同一批三路径断言——只有 true 落盘。
 // 核心测试形态：同一批「默认值 + 原始值」用例同时喂归一化入口、读路径（mergeConfig）
 // 与写路径（pruneConfig），断言三者对「空 / 非空」的判断完全一致——判空不漂移的自动化保障。
 // 工单 04：规则的解释（缺占位符判定、占位文字与示例清单）同处本模块，并加守门断言。
@@ -26,6 +27,7 @@ const DEFAULTS_SNAPSHOT = () => ({
   targetLang: TRANSLATE_CONFIG.targetLang,
   reasoningEffort: "none",
   concurrency: TRANSLATE_CONFIG.concurrency,
+  reuseSession: TRANSLATE_CONFIG.reuseSession,
   promptTemplate: DEFAULT_PROMPT_TEMPLATE,
   extra: "",
 });
@@ -74,6 +76,16 @@ const CASES = [
   ["concurrency", {}, undefined],
   ["concurrency", [6], undefined],
   ["concurrency", "6abc", undefined],
+  // ---- 布尔字段（会话重用开关）：只认 true；false 与其余类型一律为空 ----
+  ["reuseSession", true, true],
+  ["reuseSession", false, undefined],
+  ["reuseSession", "true", undefined],
+  ["reuseSession", 1, undefined],
+  ["reuseSession", null, undefined],
+  ["reuseSession", undefined, undefined],
+  ["reuseSession", "", undefined],
+  ["reuseSession", [], undefined],
+  ["reuseSession", {}, undefined],
   // ---- 提示词模板：字符串规则 + 必须包含 {host} ----
   ["promptTemplate", null, undefined],
   ["promptTemplate", "", undefined],
@@ -366,6 +378,56 @@ test("守门：占位示例清单里的每个键，其默认值必须是空串",
 
 test("并发池默认 20（宿主即请求：每宿主一次端点请求）", () => {
   assert.equal(TRANSLATE_CONFIG.concurrency, 20);
+});
+
+// ---------------- 工单 01（session-reuse）：会话重用开关的布尔判空 ----------------
+
+// 布尔规则的完整边界：存储缺键、垃圾值（含字符串 "true"）都回退默认 false——
+// 运行时配置里恒是一个确定的布尔值，调用方不必再防空。
+test("reuseSession: 默认关；只有存储里的 true 生效，其余值一律判空回退 false", async () => {
+  assert.equal(TRANSLATE_CONFIG.reuseSession, false, "默认关");
+
+  for (const raw of [null, undefined, false, "true", "false", 1, 0, "", "  ", [], {}]) {
+    const what = `reuseSession=${String(raw)}`;
+    assert.equal(
+      Object.hasOwn(sanitizeStored(TRANSLATE_CONFIG, { reuseSession: raw }), "reuseSession"),
+      false,
+      `归一化判空删键：${what}`,
+    );
+    assert.equal(
+      mergeConfig(TRANSLATE_CONFIG, { reuseSession: raw }).reuseSession,
+      false,
+      `读路径回退默认 false：${what}`,
+    );
+  }
+
+  const stored = { reuseSession: true };
+  assert.deepEqual(sanitizeStored(TRANSLATE_CONFIG, stored), stored, "true 落盘");
+  assert.equal(mergeConfig(TRANSLATE_CONFIG, stored).reuseSession, true, "true 生效");
+
+  // 存储缺键（含整个 config 键缺失）：运行时仍是确定的布尔值
+  for (const raw of [null, {}]) {
+    assert.equal(typeof mergeConfig(TRANSLATE_CONFIG, raw).reuseSession, "boolean");
+    assert.equal(mergeConfig(TRANSLATE_CONFIG, raw).reuseSession, false);
+  }
+  assert.equal(typeof (await loadConfig()).reuseSession, "boolean", "loadConfig 恒给布尔值");
+  assert.equal((await loadConfig()).reuseSession, false);
+});
+
+// 写路径往返：勾选（表单 true）→ 载荷含该键 → 读回 true；未勾选（表单 false）→ 删键 → 读回默认 false。
+test("reuseSession: 表单 true 落盘、false 删键，prune → merge 往返回到同一个布尔", () => {
+  const checked = pruneConfig(TRANSLATE_CONFIG, { reuseSession: true });
+  assert.deepEqual(checked, { reuseSession: true }, "勾选 → 载荷含该键");
+  assert.equal(mergeConfig(TRANSLATE_CONFIG, checked).reuseSession, true, "往返仍是 true");
+
+  const unchecked = pruneConfig(TRANSLATE_CONFIG, { reuseSession: false });
+  assert.deepEqual(unchecked, {}, "未勾选 → 删键（载荷里没有该键）");
+  assert.equal(mergeConfig(TRANSLATE_CONFIG, unchecked).reuseSession, false, "往返回到默认 false");
+  assert.deepEqual(
+    pruneConfig(TRANSLATE_CONFIG, { reuseSession: false, targetLang: "English" }),
+    { targetLang: "English" },
+    "未勾选只删自己，其余键照常落盘",
+  );
 });
 
 test("readStored：取 sync 存储里 config 的原始对象，缺失返回 null", async () => {

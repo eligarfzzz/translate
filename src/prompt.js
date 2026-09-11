@@ -4,13 +4,30 @@
 // 写入 DOM 前由 stripHostWrapper 剥回来——包装给了模型一个明确的片段边界，
 // 回显多余的前后言语因此落在包装外，可被整段丢弃。
 
+// 「恰一层 <html>…</html>」判定的唯一实现：整体（trim 后）恰为一层 html 包装时返回
+// 内层文本，否则 null。容忍属性（<html lang="zh-CN">）、大小写、首尾空白。
+// 包装的三件事（注入、判定、剥壳）全部以它为准——不存在第二套「什么是包装」的标准。
+function matchHostWrapper(text) {
+  return /^<html[^>]*>([\s\S]*)<\/html>$/i.exec(String(text).trim());
+}
+
+// 包装 helper（renderPrompt 注入 {host} 用它；会话链的 user 轮同形包装也用它，
+// 见 spec D4「包装 helper 唯一来源 prompt.js」）。null/undefined → 空壳。
+function wrapHost(text) {
+  return `<html>${text == null ? "" : String(text)}</html>`;
+}
+
+// 是否恰为一层包装（background 的回显形态判定用）：空壳 <html></html> 为真。
+function isHostWrapped(text) {
+  return matchHostWrapper(text) !== null;
+}
+
 // 剥离最外层 <html>…</html> 包装（renderPrompt 注入包装的逆操作）。
 // 仅当整体（trim 后）恰为一层 html 包装时剥离；无包装或其他形态原样返回（trim 后）。
-// 容忍属性（<html lang="zh-CN">）、大小写、首尾空白；纯空壳 <html></html> → ""。
+// 纯空壳 <html></html> → ""。
 function stripHostWrapper(text) {
-  const s = String(text).trim();
-  const m = /^<html[^>]*>([\s\S]*)<\/html>$/i.exec(s);
-  return m ? m[1].trim() : s;
+  const m = matchHostWrapper(text);
+  return m ? m[1].trim() : String(text).trim();
 }
 
 // 渲染：template 必含 "{host}"（缺失抛错，消费侧据此回退默认模板）；
@@ -22,7 +39,7 @@ function renderPrompt(template, hostHtml, vars) {
   if (typeof template !== "string" || !template.includes("{host}")) {
     throw new Error("prompt template missing {host} placeholder");
   }
-  const hostValue = `<html>${hostHtml == null ? "" : String(hostHtml)}</html>`;
+  const hostValue = wrapHost(hostHtml);
   const varsObj = vars && typeof vars === "object" ? vars : {};
   // 替换值用函数形式给出，避免 "$&" 之类替换串特殊语法被解释；只认自有键（原型成员不算）
   return template.replace(/\{([^{}]+)\}/g, (placeholder, key) => {
@@ -45,4 +62,4 @@ const DEFAULT_PROMPT_TEMPLATE = [
   "{host}",
 ].join("\n");
 
-export { DEFAULT_PROMPT_TEMPLATE, renderPrompt, stripHostWrapper };
+export { DEFAULT_PROMPT_TEMPLATE, renderPrompt, stripHostWrapper, wrapHost, isHostWrapped };

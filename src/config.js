@@ -21,6 +21,8 @@ const TRANSLATE_CONFIG = {
   reasoningEffort: "none",
   // 并发池上限：同时在途的单宿主请求数（每宿主一次端点请求）
   concurrency: 20,
+  // 会话重用开关，默认关（关时每宿主仍是独立无状态请求，见 ADR-0005）
+  reuseSession: false,
   // 提示词模板：模板正文的唯一来源是 prompt.js；归一化时额外要求含 {host}（见 HOST_PLACEHOLDER_KEYS）
   promptTemplate: DEFAULT_PROMPT_TEMPLATE,
   // 追加提示词：插到模板里 {extra} 处的自定义规则（多行可用）；空即未设置，跟随版本默认（空）
@@ -72,6 +74,7 @@ function isMissingHostPlaceholder(key, raw) {
 // （有效值永远不是 undefined）。读路径与写路径共用此函数，判断不可能漂移。
 //   字符串：字符串且 trim 后非空——null/undefined/数字/对象/数组/纯空白一律为空
 //   数字：number 或数字串，有限、大于 0 的整数——0/负数/小数/NaN/非有限/非数字串/空串为空
+//   布尔：仅字面量 true 有效——false 与其余类型（含字符串 "true"）一律为空，即删键
 //   提示词模板：字符串规则之上还必须包含 {host}，缺占位符等同留空（规则本体见 lacksHostPlaceholder）
 function normalizeValue(key, defaultValue, raw) {
   if (typeof defaultValue === "number") {
@@ -79,6 +82,9 @@ function normalizeValue(key, defaultValue, raw) {
     const n = typeof raw === "number" ? raw : Number(raw.trim());
     return Number.isInteger(n) && n > 0 ? n : undefined;
   }
+  // 布尔字段（会话重用之类）：只有字面量 true 才落盘——未勾选即未设置，
+  // 回退默认 false；字符串 "true"、数字、null 等形态一律不认。
+  if (typeof defaultValue === "boolean") return raw === true ? true : undefined;
   if (typeof defaultValue !== "string") return undefined;
   if (typeof raw !== "string") return undefined;
   const s = raw.trim();

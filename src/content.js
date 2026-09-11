@@ -63,6 +63,8 @@ function createContentSession(env) {
       badge.addHosts(entries.filter((e) => e.tier < TIER_PERIPHERAL).length, entries.length);
       // 读路径已归一化：该字段恒为默认值表给出的正整数（空/非法值一律回退默认），无需再兜底
       const limit = cfg.concurrency;
+      // 会话重用开关透传给并发池：开启时每槽持一条会话链（缺省 false = 与现状逐字节一致）
+      const reuse = cfg.reuseSession;
       if (initial) {
         // 分档统计：排序是纯时序行为，页面上看不出——没这行无法确认排序真的生效
         const tiers = [0, 0, 0];
@@ -80,7 +82,7 @@ function createContentSession(env) {
       } else {
         DBG.debug("rescan:", entries.length, "new hosts");
       }
-      await translator.translateEntries(entries, limit);
+      await translator.translateEntries(entries, limit, reuse);
     } finally {
       session.endTranslating();
     }

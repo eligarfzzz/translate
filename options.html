@@ -27,6 +27,12 @@
         padding: 6px;
         font-family: inherit;
       }
+      /* 复选框不参与满宽文本控件的排版：按自身大小盒定，标签文字紧跟其后 */
+      input[type="checkbox"] {
+        width: auto;
+        padding: 0;
+        margin-right: 6px;
+      }
       button {
         margin-top: 16px;
         padding: 8px 16px;
@@ -108,6 +114,7 @@
         <label
           >并发上限（同时在途请求数）<input name="concurrency" type="number" min="1" step="1"
         /></label>
+        <label><input name="reuseSession" type="checkbox" />重用会话</label>
         <button type="button" data-restore="api">恢复默认</button>
         <p class="hint">模型思考（thinking）始终关闭，不可配置。修改保存后，下一次翻译立即生效。</p>
       </div>

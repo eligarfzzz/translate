@@ -4,7 +4,13 @@
 import { test } from "node:test";
 import assert from "node:assert";
 
-import { DEFAULT_PROMPT_TEMPLATE, renderPrompt, stripHostWrapper } from "../src/prompt.js";
+import {
+  DEFAULT_PROMPT_TEMPLATE,
+  renderPrompt,
+  stripHostWrapper,
+  wrapHost,
+  isHostWrapped,
+} from "../src/prompt.js";
 
 test("默认模板渲染：注入单宿主骨架并替换 {target}", () => {
   const out = renderPrompt(DEFAULT_PROMPT_TEMPLATE, "<p>a</p>", { target: "中文" });
@@ -110,4 +116,42 @@ test("包装协议: 文本本身含 html 时只剥最外侧一层", () => {
   assert.equal(stripHostWrapper("<html><p>a<b>b</b></p></html>"), "<p>a<b>b</b></p>");
   // 双重包装只剥一层，内层 <html> 保留
   assert.equal(stripHostWrapper("<html><html>x</html></html>"), "<html>x</html>");
+});
+
+// ---- 共用包装 helper 与「恰一层包装」判定（票 03：会话链组装与回显形态判定同源） ----
+
+test("包装 helper: 恰一层 <html>…</html>；null/undefined 得空壳", () => {
+  assert.equal(wrapHost("<p>a</p>"), "<html><p>a</p></html>");
+  assert.equal(wrapHost(""), "<html></html>");
+  assert.equal(wrapHost(null), "<html></html>");
+  assert.equal(wrapHost(undefined), "<html></html>");
+});
+
+test("包装判定: 恰一层包装为真（容忍属性/大小写/首尾空白），其余形态为假", () => {
+  assert.equal(isHostWrapped("<html>x</html>"), true);
+  assert.equal(isHostWrapped('<html lang="zh-CN">x</html>'), true);
+  assert.equal(isHostWrapped("  <HTML>x</HTML>\n"), true);
+  assert.equal(isHostWrapped("<html></html>"), true, "空壳也是合规包装（空回显另行判定）");
+  assert.equal(isHostWrapped(""), false);
+  assert.equal(isHostWrapped("x"), false);
+  assert.equal(isHostWrapped("<html>x"), false);
+  assert.equal(isHostWrapped("x</html>"), false);
+  assert.equal(isHostWrapped("Sure! <html>x</html>"), false, "包装前带废话 = 不合形态");
+  assert.equal(isHostWrapped("<html>x</html> Hope it helps!"), false, "包装后带废话 = 不合形态");
+});
+
+test("判定与剥壳同源: 判定为真 → 剥出内层；判定为假 → 原样（trim 后）返回", () => {
+  for (const [text, inner] of [
+    ["<html><p>a<b>b</b></p></html>", "<p>a<b>b</b></p>"],
+    ['<html lang="zh">x</html>', "x"],
+    ["<html></html>", ""],
+    ["  <html> x </html>  ", "x"],
+  ]) {
+    assert.equal(isHostWrapped(text), true, `判定为真: ${text}`);
+    assert.equal(stripHostWrapper(text), inner, `剥出内层: ${text}`);
+  }
+  for (const text of ["plain text", "<p>a</p>", "<html>half", "x</html>"]) {
+    assert.equal(isHostWrapped(text), false, `判定为假: ${text}`);
+    assert.equal(stripHostWrapper(text), text.trim(), `原样返回: ${text}`);
+  }
 });

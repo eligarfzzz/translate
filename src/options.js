@@ -10,7 +10,7 @@ import {
 
 // 分组表是唯一事实来源：TAB 归属、恢复默认的作用域、FIELDS 全部由它派生，避免两处清单漂移
 const GROUPS = {
-  api: { label: "API", fields: ["apiBase", "apiKey", "model", "concurrency"] },
+  api: { label: "API", fields: ["apiBase", "apiKey", "model", "concurrency", "reuseSession"] },
   prompt: { label: "提示词", fields: ["promptTemplate", "extra"] },
   general: { label: "通用", fields: ["targetLang"] },
 };
@@ -26,12 +26,22 @@ function flash(msg) {
   }, 2500);
 }
 
+// 表单控件 ↔ 配置值（唯一一处）：文本/数字控件走 value（恒为字符串），复选框走 checked（布尔）。
+// 回填、保存、按组清空三处都经这两个函数，控件类型的知识不散落。写入 undefined 即「未设置」
+// ——空框 / 未勾选，正是「空即未设置」在 DOM 上的形态；判空本身仍在配置模块。
+const readValue = (el) => (el.type === "checkbox" ? el.checked : el.value);
+const writeValue = (el, value) => {
+  if (el.type === "checkbox") el.checked = value === true;
+  else el.value = value ?? "";
+};
+
 // 空框占位：占位文字（默认值本身 / 空串默认值字段的示例）由配置模块给出，运行时注入、
-// 不写进 HTML；一视同仁——不区分该字段是否已设置，有值时占位本就不显示
+// 不写进 HTML；一视同仁——不区分该字段是否已设置，有值时占位本就不显示。
+// 复选框没有空框，不收占位（布尔字段的占位文字是 String(false)，写进 DOM 只是废属性）。
 function fillPlaceholders() {
   for (const f of FIELDS) {
     const el = form.elements[f];
-    if (!el) continue;
+    if (!el || el.type === "checkbox") continue;
     el.placeholder = placeholderText(f);
   }
 }
@@ -40,14 +50,15 @@ async function fillForm() {
   // 回填：只显示存储中真实存在的非空值；未设置的字段留空（空即未设置），由占位显示将生效的默认值
   const stored = await loadStoredConfig(chrome.storage);
   for (const f of FIELDS) {
-    if (form.elements[f]) form.elements[f].value = stored[f] ?? "";
+    if (form.elements[f]) writeValue(form.elements[f], stored[f]);
   }
 }
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
   const formValues = {};
-  for (const f of FIELDS) formValues[f] = form.elements[f].value;
+  // 表单值：文本/数字控件是字符串，复选框是布尔——判空规则在配置模块按默认值类型分派
+  for (const f of FIELDS) formValues[f] = readValue(form.elements[f]);
   // 模板非空但缺 {host}：与「模板为空」区分，给专门文案；判定函数与归一化同源（配置模块）
   const templateDropped = isMissingHostPlaceholder("promptTemplate", formValues.promptTemplate);
   // 反馈口径：基准是写入之前的归一化存储——只有真正被清掉的旧键才算「已删除设置」，
@@ -83,7 +94,8 @@ for (const btn of document.querySelectorAll("[data-restore]")) {
     const group = GROUPS[name];
     if (!group) return;
     for (const f of group.fields) {
-      if (form.elements[f]) form.elements[f].value = "";
+      // 清空 = 写回「未设置」：文本/数字控件回空框，复选框回未勾选
+      if (form.elements[f]) writeValue(form.elements[f], undefined);
     }
     DBG.debug("group cleared (not saved):", name);
     flash(`已清空「${group.label}」，将使用默认值，点保存生效`);
