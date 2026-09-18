@@ -5,6 +5,8 @@
 // → 端口 posted（content → background 的 start：text + 可选 history）与 DOM 输出。
 // 覆盖：每槽一条链（并发 3 的 abcdef 归属）、失败段不进链、restart 清空失败尝试
 // 的流式文本、重试不增 settle、关（缺省 / false）时 start 不带 history。
+// 票 04（短文本缓存 content 半，ADR-0008 D5/D7）追加：cached 段跳过入链、
+// 首轮落定后 cleanup-cache 恰好一次（重扫 / 开关关 / 还原后均不发）。
 // ============================================================
 
 import test from "node:test";
@@ -281,5 +283,190 @@ test("空回显不进链: 零 delta 与 <html></html> 都不留历史", async ()
     env.body.querySelector(".translate-progress").textContent,
     "66% 2/3(3)(2)",
     "两段空回显各计一次失败落定（无额外计数）",
+  );
+});
+
+// ============================================================
+// 短文本缓存（票 04，ADR-0008 D5）：done.cached === true 的段跳过 chain.push
+// ============================================================
+
+// 回放缓存命中（background D3 的命中路径：一条 delta 缓存回显全文 + done{cached:true}）
+function deliverCached(port, text) {
+  port.emit({ type: "delta", text: String(text) });
+  port.emit({ type: "done", cached: true });
+}
+
+test("cached 段不进链: 命中段照常定稿计数，同槽下一请求回到链首形态", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<p ${B}>cached one english text</p>` +
+      `<p ${B}>real two english text</p>` +
+      `<p ${B}>real three english text</p>`,
+    config: { reuseSession: true, concurrency: 1 },
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 1);
+
+  // 第一段：缓存命中
+  deliverCached(env.ports[0], "<html>命中译文一</html>");
+  await env.clock.settle();
+
+  // 渲染路径逐字节照旧：剥壳定稿写入 + 落定计数（无错误括号）
+  const node = env.body.querySelectorAll("p")[0].querySelector(".translate-node");
+  assert.equal(node.textContent, "命中译文一", "命中段照常剥壳定稿");
+  assert.equal(
+    env.body.querySelector(".translate-progress").textContent,
+    "33% 1/3(3)",
+    "命中段照常落定计数",
+  );
+
+  // 同槽下一段：命中段未入链 → 链为空 → 链首形态（不带 history）
+  assert.equal(env.ports.length, 2);
+  assert.equal("history" in env.ports[1].posted[0], false, "cached 段不进链：第二段回到链首形态");
+
+  // 第二段真实翻译成功 → 链从第一个未命中段开始累积
+  const secondHtml = env.ports[1].posted[0].text;
+  env.ports[1].deliver("<html>译文二</html>");
+  await env.clock.settle();
+  assert.equal(env.ports.length, 3);
+  assert.deepEqual(
+    env.ports[2].posted[0].history,
+    [{ html: secondHtml, echo: "<html>译文二</html>" }],
+    "第三段的历史只含第一个未命中段（链从它开始累积）",
+  );
+});
+
+test("cached 段不进链: 前几段全命中时链从第一个未命中段开始；cached:false 照常进链", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<p ${B}>hit a english text</p>` +
+      `<p ${B}>hit b english text</p>` +
+      `<p ${B}>miss c english text</p>` +
+      `<p ${B}>miss d english text</p>`,
+    config: { reuseSession: true, concurrency: 1 },
+  });
+  await env.send({ type: "translate" });
+
+  deliverCached(env.ports[0], "<html>甲</html>");
+  await env.clock.settle();
+  deliverCached(env.ports[1], "<html>乙</html>");
+  await env.clock.settle();
+  assert.equal("history" in env.ports[2].posted[0], false, "槽位前两段全命中：第三段仍是链首形态");
+
+  // 显式 cached:false（非命中回放，普通上游定稿）：该段照常进链，成为本槽链首
+  const thirdHtml = env.ports[2].posted[0].text;
+  env.ports[2].emit({ type: "delta", text: "<html>丙</html>" });
+  env.ports[2].emit({ type: "done", cached: false });
+  await env.clock.settle();
+  assert.equal(env.ports.length, 4);
+  assert.deepEqual(
+    env.ports[3].posted[0].history,
+    [{ html: thirdHtml, echo: "<html>丙</html>" }],
+    "cached:false 不是命中：该段照常进链（回归）",
+  );
+});
+
+// ============================================================
+// 短文本缓存（票 04，ADR-0008 D7）：首轮落定后 cleanup-cache 每会话恰好一次
+// ============================================================
+
+test("清理触发: 首轮全部宿主落定后恰好发一条 cleanup-cache", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>cleanup first english host</p><p ${B}>cleanup second english host</p>`,
+    config: { concurrency: 2 },
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 2);
+  assert.equal(env.sentMessages.length, 0, "请求在途时不发");
+
+  env.ports[0].deliver("<html>甲</html>");
+  await env.clock.settle();
+  assert.equal(env.sentMessages.length, 0, "部分落定还不发（等该轮全部落定）");
+
+  env.ports[1].deliver("<html>乙</html>");
+  await env.clock.settle();
+  assert.deepEqual(
+    env.sentMessages,
+    [{ type: "cleanup-cache" }],
+    "首轮全部落定后恰好一条 cleanup-cache",
+  );
+  await env.clock.advance(1000);
+  assert.equal(env.sentMessages.length, 1, "调度收敛后仍恰好一条");
+});
+
+test("清理触发: 同会话重扫不再发（每会话恰好一次）", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>first round english host</p>`,
+    config: { concurrency: 1 },
+  });
+  await env.send({ type: "translate" });
+  env.ports[0].deliver("<html>甲</html>");
+  await env.clock.settle();
+  assert.equal(env.sentMessages.length, 1, "前提：首轮落定后已发一次");
+
+  // 页面动态新增宿主 → 防抖到期 → 重扫 → 新宿主落定
+  env.body.insertAdjacentHTML("beforeend", `<p ${B}>second round english host</p>`);
+  await env.clock.settle();
+  await env.clock.advance(500);
+  assert.equal(env.ports.length, 2, "重扫发现新宿主");
+  env.ports[1].deliver("<html>乙</html>");
+  await env.clock.settle();
+  await env.clock.advance(1000);
+  assert.deepEqual(
+    env.sentMessages,
+    [{ type: "cleanup-cache" }],
+    "重扫（runRound(false)）落定后仍恰好一条：重扫不触发",
+  );
+});
+
+test("清理触发: cacheEnabled 关闭时首轮落定后不发", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>cache off english host</p>`,
+    config: { concurrency: 1, cacheEnabled: false },
+  });
+  await env.send({ type: "translate" });
+  env.ports[0].deliver("<html>甲</html>");
+  await env.clock.settle();
+  await env.clock.advance(1000);
+  assert.equal(env.sentMessages.length, 0, "开关关：不查不清，首轮落定后也不发");
+});
+
+test("清理触发: 还原后迟到的收尾不发（会话已关）", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>revert race english host</p>`,
+    config: { concurrency: 1 },
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 1);
+
+  // 落定与还原挤进同一个同步窗口：done 的 resolve 尚在微任务队列，
+  // 还原已先把会话关掉——迟到的首轮收尾不得再发清理
+  env.ports[0].deliver("<html>甲</html>");
+  await env.send({ type: "revert" });
+  await env.clock.settle();
+  await env.clock.advance(1000);
+  assert.equal(env.sentMessages.length, 0, "还原后收尾到达：不发");
+});
+
+test("清理触发: 还原后的新会话首轮仍发一次（按会话计，非按页面计）", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>per session english host</p>`,
+    config: { concurrency: 1 },
+  });
+  await env.send({ type: "translate" });
+  env.ports[0].deliver("<html>甲</html>");
+  await env.clock.settle();
+  assert.equal(env.sentMessages.length, 1, "第一个会话首轮已发");
+
+  // 还原 → 新会话：宿主重新被发现，首轮落定后发出新会话自己的一次
+  await env.send({ type: "revert" });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 2, "新会话重新发现宿主");
+  env.ports[1].deliver("<html>甲</html>");
+  await env.clock.settle();
+  assert.deepEqual(
+    env.sentMessages,
+    [{ type: "cleanup-cache" }, { type: "cleanup-cache" }],
+    "新会话首轮落定后发出它自己的一次（每会话恰好一次）",
   );
 });

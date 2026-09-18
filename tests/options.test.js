@@ -2,6 +2,8 @@
 // 工单 02（empty-means-unset）：空框占位（默认值 / 假值示例）与「恢复默认」= 清空 + 保存 = 删键。
 // 工单 01（session-reuse）：布尔字段 reuseSession 的同名复选框——勾选落 true、未勾选删键，
 // 「未设置」在它身上是未勾选（而不是空框）。
+// 票 02（cache-manual-clear）：「清空缓存」按钮——一次性动作，发 clear-cache 消息按回应
+// 回显条数 / 失败；不参与保存（无 name）、不写存储、不读配置（开关关着照发）。
 // 接缝：chrome.storage.sync 的存储形态 ↔ 配置页输入框的可见值（value/placeholder/checked）与存储内容，
 // 全部走 tests/helpers/options-sandbox.js（真实 options.html + 存储替身 + 干净模块实例）。
 import test from "node:test";
@@ -15,9 +17,10 @@ import { createOptionsSandbox } from "./helpers/options-sandbox.js";
 const fieldNames = (env) => [...env.form.querySelectorAll("[name]")].map((el) => el.name);
 
 // 控件的可见值：文本/数字控件是 value（字符串），复选框是 checked（布尔）。
-// 「未设置」在两者身上分别是空框与未勾选——遍历整表单的断言都经这两个函数取值，不散落类型分支。
+// 「未设置」在两者身上分别是空框与默认勾选态（默认关 → 未勾选，默认开 → 勾选）——
+// 复选框的默认面取自默认值表，默认关与默认开的布尔字段在此分叉。
 const visibleValue = (el) => (el.type === "checkbox" ? el.checked : el.value);
-const unsetValue = (el) => (el.type === "checkbox" ? false : "");
+const unsetValue = (el) => (el.type === "checkbox" ? TRANSLATE_CONFIG[el.name] === true : "");
 
 // 占位契约：非空默认值 → 默认值本身（模板即默认模板全文，textarea 多行）；默认值为空串的
 // 三个 API 字段 → 描述性假值示例（零痕迹：不出现真实端点、凭证或厂商模型名）
@@ -32,6 +35,11 @@ const PLACEHOLDER = {
   promptTemplate: DEFAULT_PROMPT_TEMPLATE,
   // 追加提示词：空串默认值且不在示例清单里 → 空框无灰色提示
   extra: "",
+  // 短文本缓存：复选框没有空框，不收占位（同 reuseSession）；三个数值键占位即默认值
+  cacheEnabled: "",
+  cacheMaxEntries: "10000",
+  cacheTtlDays: "30",
+  cacheMaxBytes: "30",
 };
 
 // 全套非空存储：API 三项故意用与占位不同的假值，以区分「显示真实保存值」与「占位文字」
@@ -123,13 +131,13 @@ test("回填: 存储里的空/非法值（纯空白、小数、缺 {host} 的模
   }
 });
 
-test("回填: 存储里没有 config 键时每个输入框都为空", async (t) => {
+test("回填: 存储里没有 config 键时每个字段都显示「未设置」（空框 / 复选框默认态）", async (t) => {
   const env = await createOptionsSandbox();
   t.after(() => env.dispose());
 
   for (const name of fieldNames(env)) {
     const el = env.field(name);
-    assert.equal(visibleValue(el), unsetValue(el), `${name} 未设置 → 空（未勾选）`);
+    assert.equal(visibleValue(el), unsetValue(el), `${name} 未设置 → 空（复选框默认态）`);
   }
 });
 
@@ -234,6 +242,148 @@ test("端到端: 勾选保存后重开仍是勾选；取消勾选保存后重开
   const third = await createOptionsSandbox({ stored: persisted2 });
   t.after(() => third.dispose());
   assert.equal(third.field("reuseSession").checked, false, "重开仍是未勾选");
+});
+
+// ---------------- 短文本缓存开关（工单 01 short-text-cache：默认开的布尔镜像） ----------------
+// 默认开的布尔字段，「未设置」的可见形态是勾选（默认态）：存储里的 false 回填成未勾选，
+// 未设置/垃圾值都是勾选；保存时未勾选落 false、勾选（默认态）删键——与空框同一条「空即未设置」。
+
+test("回填: 存储里存过 false → 复选框未勾选；未存过或存的是垃圾值 → 勾选（默认开）", async (t) => {
+  const off = await createOptionsSandbox({ stored: { cacheEnabled: false } });
+  t.after(() => off.dispose());
+  assert.equal(off.field("cacheEnabled").type, "checkbox", "前置：该字段是复选框");
+  assert.equal(off.field("cacheEnabled").checked, false, "存 false → 未勾选");
+
+  // 字符串 "false" 不算设置（布尔判空只认字面量 false）——回填按未设置回到默认勾选
+  const garbage = await createOptionsSandbox({ stored: { cacheEnabled: "false" } });
+  t.after(() => garbage.dispose());
+  assert.equal(garbage.field("cacheEnabled").checked, true, '字符串 "false" 不算设置 → 默认勾选');
+
+  const empty = await createOptionsSandbox();
+  t.after(() => empty.dispose());
+  assert.equal(empty.field("cacheEnabled").checked, true, "存储为空 → 勾选（默认开）");
+});
+
+test("保存: 取消勾选 → 存储含 cacheEnabled: false（布尔落盘，与其余键共存）", async (t) => {
+  const env = await createOptionsSandbox();
+  t.after(() => env.dispose());
+
+  env.field("model").value = "example-model";
+  env.field("cacheEnabled").checked = false;
+  await env.submit();
+
+  assert.deepEqual(env.storedConfig(), { model: "example-model", cacheEnabled: false });
+  assert.equal(
+    typeof env.storedConfig().cacheEnabled,
+    "boolean",
+    '存储形态是真布尔，不是字符串 "false"',
+  );
+});
+
+test("保存: 重新勾选（回到默认开）→ 删键，原本的 false 被清掉并计入「已删除 N 项」", async (t) => {
+  const env = await createOptionsSandbox({
+    stored: { cacheEnabled: false, targetLang: "English" },
+  });
+  t.after(() => env.dispose());
+  assert.equal(env.field("cacheEnabled").checked, false, "前置：旧值已回填");
+
+  env.field("cacheEnabled").checked = true;
+  await env.submit();
+
+  assert.deepEqual(env.storedConfig(), { targetLang: "English" }, "回到默认态 → 键从存储里消失");
+  assert.equal(
+    env.status.textContent,
+    "已保存 ✓ 下一次翻译生效；其中 1 项为空，已删除设置、回退默认",
+    "原本 false 被清掉 → 计入已删除项数",
+  );
+});
+
+// 一个默认开的开关，对从未设置过它的用户不得每次保存都多报一项「已删除设置」，
+// 也不得把默认态落盘（勾选 = 默认 = 未设置，存储里本没有该键、本次也没动 = 什么都没被删）。
+test("保存: 勾选且存储里本没有该键 → 不落盘、不提删除", async (t) => {
+  const env = await createOptionsSandbox({ stored: { targetLang: "English" } });
+  t.after(() => env.dispose());
+  assert.equal(env.field("cacheEnabled").checked, true, "前置：未设置 → 默认勾选");
+
+  await env.submit(); // 表单未改动：复选框保持默认勾选
+
+  assert.deepEqual(env.storedConfig(), { targetLang: "English" });
+  assert.equal(env.status.textContent, "已保存 ✓ 下一次翻译生效");
+});
+
+test("端到端: 取消勾选保存后重开仍是未勾选；重新勾选保存后重开仍是勾选（默认开）", async (t) => {
+  const first = await createOptionsSandbox({ stored: { targetLang: "English" } });
+  t.after(() => first.dispose());
+  first.field("cacheEnabled").checked = false;
+  await first.submit();
+  const persisted = first.storedConfig();
+  assert.equal(persisted.cacheEnabled, false, "取消勾选 → 真布尔落盘");
+  first.dispose(); // 重开配置页 = 旧文档与旧模块实例一起丢弃
+
+  const second = await createOptionsSandbox({ stored: persisted });
+  t.after(() => second.dispose());
+  assert.equal(second.field("cacheEnabled").checked, false, "重开仍是未勾选");
+
+  second.field("cacheEnabled").checked = true;
+  await second.submit();
+  const persisted2 = second.storedConfig();
+  assert.deepEqual(persisted2, { targetLang: "English" }, "回到默认态 → 键从存储里消失");
+  second.dispose();
+
+  const third = await createOptionsSandbox({ stored: persisted2 });
+  t.after(() => third.dispose());
+  assert.equal(third.field("cacheEnabled").checked, true, "重开仍是勾选（默认开）");
+});
+
+// ---------------- 短文本缓存数值键（正整数输入） ----------------
+
+test("保存: 三个缓存数值键填入 → 以 number 落盘；清空或非法值 → 删键", async (t) => {
+  const env = await createOptionsSandbox({
+    stored: { cacheMaxEntries: 5000, cacheTtlDays: 7, cacheMaxBytes: 64 },
+  });
+  t.after(() => env.dispose());
+  assert.equal(env.field("cacheMaxEntries").value, "5000", "前置：旧值已回填");
+  assert.equal(env.field("cacheTtlDays").value, "7", "前置：旧值已回填");
+  assert.equal(env.field("cacheMaxBytes").value, "64", "前置：旧值已回填");
+
+  env.field("cacheMaxEntries").value = "20000";
+  env.field("cacheTtlDays").value = ""; // 清空 → 判空删除
+  env.field("cacheMaxBytes").value = "0"; // 0 非正整数 → 判空删除
+  await env.submit();
+
+  assert.deepEqual(env.storedConfig(), { cacheMaxEntries: 20000 });
+  assert.equal(typeof env.storedConfig().cacheMaxEntries, "number", "数字字段以 number 落盘");
+  assert.equal(
+    env.status.textContent,
+    "已保存 ✓ 下一次翻译生效；其中 2 项为空，已删除设置、回退默认",
+    "清空与非法值都被清掉 → 计入已删除项数",
+  );
+});
+
+test("恢复默认: 通用组清空后缓存复选框回到默认勾选、数值框回空出占位；保存删键", async (t) => {
+  const env = await createOptionsSandbox({
+    stored: {
+      cacheEnabled: false,
+      cacheMaxEntries: 5000,
+      cacheTtlDays: 7,
+      cacheMaxBytes: 64,
+      targetLang: "English",
+    },
+  });
+  t.after(() => env.dispose());
+
+  await env.restore("general");
+  assert.equal(env.field("cacheEnabled").checked, true, "复选框回到默认勾选（默认开）");
+  for (const name of ["cacheMaxEntries", "cacheTtlDays", "cacheMaxBytes"]) {
+    assert.equal(env.field(name).value, "", `${name} 被清空`);
+    assert.equal(env.field(name).placeholder, PLACEHOLDER[name], `${name} 占位显示将生效的默认值`);
+  }
+  assert.equal(env.field("targetLang").value, "", "目标语言随该组一起清空");
+  assert.equal(env.status.textContent, "已清空「通用」，将使用默认值，点保存生效");
+  assert.deepEqual(env.syncWrites, [], "不写存储");
+
+  await env.submit();
+  assert.equal(env.storedConfig(), null, "全组删键：config 键本身被删除");
 });
 
 // ---------------- 空框占位（空 / 有值 / 混合三种存储形态） ----------------
@@ -539,6 +689,79 @@ test("恢复默认 + 保存: 该组键从存储中删除，其他组保留；重
     assert.equal(second.field(name).placeholder, PLACEHOLDER[name], `${name} 重开仍有默认占位`);
   }
   assert.equal(second.field("reuseSession").checked, false, "重开仍是未勾选");
+});
+
+// ---------------- 「清空缓存」按钮（cache-manual-clear 票 02） ----------------
+// 按钮是「不参与保存的一次性动作」（spec D2/D10）：无 name、不写存储、不读配置。
+// 消息契约（票 01）：请求 { type: "clear-cache" }，回应 { ok, removed }——ok 为真
+// （含 removed: 0）走成功文案，ok 为假或发送 / 回应抛错走失败文案（D7：失败必须可见）。
+
+test("清空缓存: 点击恰好发出一条 clear-cache 消息（类型与载荷正确）", async (t) => {
+  const env = await createOptionsSandbox({ clearCacheResult: { ok: true, removed: 3 } });
+  t.after(() => env.dispose());
+
+  await env.clearCache();
+
+  assert.deepEqual(env.sentMessages, [{ type: "clear-cache" }], "恰好一条，载荷无多余键");
+});
+
+test("清空缓存: 成功回应 → 状态栏文案含回应里的条数", async (t) => {
+  const env = await createOptionsSandbox({ clearCacheResult: { ok: true, removed: 3 } });
+  t.after(() => env.dispose());
+
+  await env.clearCache();
+
+  assert.equal(env.status.textContent, "缓存已清空（3 条）");
+});
+
+test("清空缓存: removed 为 0 仍走成功文案（空库不另立分支）", async (t) => {
+  const env = await createOptionsSandbox({ clearCacheResult: { ok: true, removed: 0 } });
+  t.after(() => env.dispose());
+
+  await env.clearCache();
+
+  assert.equal(env.status.textContent, "缓存已清空（0 条）");
+});
+
+test("清空缓存: 回应失败态 → 失败文案（与成功文案可区分，不含技术细节）", async (t) => {
+  const env = await createOptionsSandbox({ clearCacheResult: { ok: false, removed: 0 } });
+  t.after(() => env.dispose());
+
+  await env.clearCache();
+
+  assert.equal(env.status.textContent, "缓存清空失败，请重试");
+});
+
+// D6 在配置页这一侧的承力用例：开关只管自动链路，按钮不读 cacheEnabled——
+// 存储里存着 false（复选框未勾选）时点击照样发出消息
+test("清空缓存: 存储里 cacheEnabled 为 false 时照样发出（开关与手动清空无关）", async (t) => {
+  const env = await createOptionsSandbox({
+    stored: { cacheEnabled: false },
+    clearCacheResult: { ok: true, removed: 2 },
+  });
+  t.after(() => env.dispose());
+  assert.equal(env.field("cacheEnabled").checked, false, "前置：复选框未勾选");
+
+  await env.clearCache();
+
+  assert.deepEqual(env.sentMessages, [{ type: "clear-cache" }]);
+  assert.equal(env.status.textContent, "缓存已清空（2 条）");
+});
+
+test("清空缓存: 不写任何存储，也不改任何输入框的值", async (t) => {
+  const env = await createOptionsSandbox({
+    stored: STORED_ALL,
+    clearCacheResult: { ok: true, removed: 1 },
+  });
+  t.after(() => env.dispose());
+  assert.equal(env.field("model").value, "example-model-stored", "前置：旧值已回填");
+
+  await env.clearCache();
+
+  assert.deepEqual(env.syncWrites, [], "sync 一字不碰");
+  assert.deepEqual(env.storedConfig(), STORED_ALL, "存储内容原样");
+  assert.equal(env.field("model").value, "example-model-stored", "输入框的值不变");
+  assert.equal(env.field("cacheEnabled").checked, true, "复选框勾选态不变");
 });
 
 test("恢复默认 + 保存: 提示词组清空后模板与追加提示词两个键从存储中删除，重开显示默认模板占位", async (t) => {

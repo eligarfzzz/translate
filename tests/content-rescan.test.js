@@ -6,6 +6,8 @@
 // 沙箱时钟排队计时器数）。全部走 tests/helpers/content-sandbox.js 基建
 // （jsdom 全量 content script + mock 单宿主请求端口 + 元素几何补丁
 // + 手动时钟 + 可选存储配置覆盖）。
+// 票 02（feed-strip-non-rendering）：端口请求内容守门——模型真正收到的 start 载荷
+// 不含非渲染标签与注释；剥离后为空的宿主不发起请求、不占并发槽、不进徽标分母。
 // ============================================================
 
 import test from "node:test";
@@ -1077,5 +1079,361 @@ test("徽标计时: 零宿主页面文案保持 0% 0/0(0)，永不出现时间�
   await env.clock.advance(10000);
   assert.equal(badge.textContent, "0% 0/0(0)", "时间流逝也不出现时间后缀（没有翻译发生过）");
   assert.equal(env.ports.length, 0, "零宿主页面无请求");
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+// ============================================================
+// 端口请求内容守门（票 02 feed-strip-non-rendering）——整页集成接缝（spec
+// Testing Decisions 接缝三）：断言只落在模型真正收到的字符串（端口 start 消息的载荷）、
+// 端口数（请求数=并发槽占用）、徽标文案与页面 DOM 上，不检查任何常量或遍历顺序。
+// 嵌套层数只是构造手段，不是规格内容。
+// ============================================================
+
+// 探针断言收成一处：对 probes 逐项断言 payload.includes(probe) === false，失败消息 = context + 该探针。
+// 探针数组仍写在各自用例内——那是各用例的规格内容（哪种形状泄漏，失败时需能就地定位）。
+function assertPayloadExcludes(payload, probes, context) {
+  for (const probe of probes) {
+    assert.equal(payload.includes(probe), false, `${context} ${probe}`);
+  }
+}
+
+// 待剥离内容的探针：出现在 start 载荷里即失败（脚本文本、注释标记、标签自身）
+const STRIPPED_PROBES = ["SCRIPT_MARK", "COMMENT_MARK", "<script", "<!--"];
+
+// 判空宿主不发起请求的等待形态（空白各形态、只含媒体标签、纯脚本容器、任意深度空壳链）
+const BLANK_HOST_BLOCKS = [
+  `<p ${B}>   \n\t  </p>`, // 纯空白文本（空格/换行/制表）
+  `<p ${B}>&nbsp;&#8203;</p>`, // 实体解码后为空白：NBSP + 零宽
+  `<div ${B}><br></div>`,
+  `<div ${B}><img src="BLANK_IMG_MARK.png"></div>`, // 只含媒体标签
+  `<div ${B}><video>fallback english text</video></div>`, // 媒体备用文本：资格判定计字、快照清空子树
+  `<div ${B}><svg viewBox="0 0 10 10"><text>chart label english</text></svg></div>`,
+  `<div ${B}><script>var only = "only script english words";</script></div>`, // 纯脚本容器
+  `<div ${B}><span><span><span>&nbsp;</span></span></span></div>`, // 任意深度空壳链
+  `<div ${B}><span><span><span><img src="DEEP_IMG_MARK.png"></span></span></span></div>`,
+  `<div ${B}><span><span><span><svg viewBox="0 0 10 10">` +
+    `<text>deep chart label english</text></svg></span></span></span></div>`,
+];
+
+test("端口守门: start 载荷含正文、不含脚本文本与注释（页面真实 DOM 一字不动）", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<p ${B}>Alpha english prose<script>var mark = "SCRIPT_MARK";</script>` +
+      `<!--COMMENT_MARK--> beta english prose</p>`,
+  });
+  await env.send({ type: "translate" });
+
+  assert.equal(env.ports.length, 1, "1 个宿主 = 1 个端口请求");
+  const start = env.ports[0].posted.find((m) => m.type === "start");
+  assert.equal(start.text, "Alpha english prose beta english prose", "载荷含正文、语序不变");
+  assertPayloadExcludes(start.text, STRIPPED_PROBES, "载荷不含");
+  assert.equal(
+    env.body.querySelector(".translate-progress").textContent,
+    "0% 0/1(1)",
+    "剥离不影响计数：宿主仍进分母",
+  );
+
+  // 剥离只作用于请求内容：页面真实 DOM 里的脚本与注释原样保留
+  const host = env.body.querySelector("p");
+  assert.ok(host.querySelector("script"), "页面真实 DOM 仍保留 script 元素");
+  assert.ok(host.innerHTML.includes("<!--COMMENT_MARK-->"), "页面真实 DOM 仍保留注释");
+
+  env.ports[0].deliver("正文译文");
+  await env.clock.settle();
+  assert.equal(host.querySelector(".translate-node").textContent, "正文译文");
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("端口守门: <template> 及其中的属性/媒体数据/脚本都不在 start 载荷里", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<p ${B}>Keep english text<template data-tpl="TPL_ATTR_MARK">` +
+      '<span data-x="1">TEMPLATE_TEXT_MARK</span>' +
+      '<img src="data:image/png;base64,TPL_MEDIA_MARK">' +
+      '<script>var s = "TPL_SCRIPT_MARK";</script>' +
+      `</template> tail english</p>`,
+  });
+  await env.send({ type: "translate" });
+
+  assert.equal(env.ports.length, 1);
+  const start = env.ports[0].posted.find((m) => m.type === "start");
+  assert.equal(
+    start.text,
+    "Keep english text tail english",
+    "删 template 元素即连带它的 content 一并消失（未挂载内容不进请求）",
+  );
+  assertPayloadExcludes(
+    start.text,
+    [
+      "template",
+      "TEMPLATE_TEXT_MARK",
+      "TPL_ATTR_MARK",
+      "TPL_MEDIA_MARK",
+      "TPL_SCRIPT_MARK",
+      "data-x",
+    ],
+    "载荷不含",
+  );
+
+  // 页面真实 DOM 的 template 元素与其 content 原样保留
+  const host = env.body.querySelector("p");
+  assert.ok(host.querySelector("template"), "页面真实 DOM 仍保留 template 元素");
+  assert.equal(
+    host.querySelector("template").content.querySelectorAll("span").length,
+    1,
+    "页面真实 DOM 的 template.content 原样保留",
+  );
+
+  env.ports[0].deliver("模板页译文");
+  await env.clock.settle();
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("端口守门: 只含空白或只含媒体标签的块不发起请求、不占并发槽、不进徽标分母", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      BLANK_HOST_BLOCKS.join("") +
+      `<p ${B}>first real english host</p><p ${B}>second real english host</p>`,
+    // 并发上限 1：判空宿主若占槽，正文宿主就会被挤后，在途端口数会先暴露它
+    config: { concurrency: 1 },
+  });
+  await env.send({ type: "translate" });
+
+  assert.equal(env.ports.length, 1, "并发上限 1：唯一在途端口属第一个正文宿主");
+  assert.equal(
+    env.ports[0].posted.find((m) => m.type === "start").text,
+    "first real english host",
+    "在途端口是正文宿主（判空宿主不占并发槽）",
+  );
+  const badge = env.body.querySelector(".translate-progress");
+  assert.equal(
+    badge.textContent,
+    "0% 0/2(2)",
+    "分母只统计真正会发请求的宿主：10 个空白/媒体块不进分母与括号",
+  );
+
+  env.ports[0].deliver("甲译文");
+  await env.clock.settle();
+  assert.equal(env.ports.length, 2, "第二个正文宿主补位：端口数=正文宿主数，空白宿主从未产生端口");
+  assert.equal(
+    env.ports[1].posted.find((m) => m.type === "start").text,
+    "second real english host",
+  );
+
+  env.ports[1].deliver("乙译文");
+  await env.clock.settle();
+  assert.equal(badge.textContent, "100% 2/2(2) 0(0)s", "两个正文宿主落定即 100%");
+  assert.equal(env.body.querySelectorAll(".translate-node").length, 2, "只有正文宿主获得译文节点");
+  for (let i = 0; i < BLANK_HOST_BLOCKS.length; i++) {
+    assert.equal(
+      env.body.children[i].querySelectorAll(".translate-node").length,
+      0,
+      `空白/媒体块 ${i} 不建译文节点`,
+    );
+  }
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("端口守门: 脚本里的中文不影响资格判定——短英文段落仍发起请求且载荷只剩正文", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<p ${B}>Short english note<script>` +
+      'var note = "这是一段很长的中文脚本文本，用来把汉字占比推高到三成以上，从而在修复前让整段被跳过";' +
+      `</script></p>`,
+  });
+  await env.send({ type: "translate" });
+
+  assert.equal(env.ports.length, 1, "脚本内中文不参与汉字占比：短英文段落照常发起请求");
+  assert.equal(
+    env.ports[0].posted.find((m) => m.type === "start").text,
+    "Short english note",
+    "请求内容只剩正文",
+  );
+  assert.equal(env.body.querySelector(".translate-progress").textContent, "0% 0/1(1)");
+
+  env.ports[0].deliver("短英文译文");
+  await env.clock.settle();
+  assert.equal(env.body.querySelector(".translate-node").textContent, "短英文译文");
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("端口守门: 嵌套深度不限——任意多层包裹里最内层的脚本/框架/模板/注释都不在载荷里", async () => {
+  // 层数只是构造手段：循环逐层加深地构造，断言的是「任意深度都被剥离」
+  const depths = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14];
+  const bodyHtml = depths
+    .map((depth) => {
+      const inner =
+        `<script>var deep = "DEEP_SCRIPT_MARK_${depth}";</script>` +
+        `<noscript><span>DEEP_NOSCRIPT_MARK_${depth}</span></noscript>` +
+        `<template><span>DEEP_TEMPLATE_MARK_${depth}</span></template>` +
+        `<!--DEEP_COMMENT_MARK_${depth}-->` +
+        `kept english prose ${depth}.`;
+      return `<div ${B}>${"<span>".repeat(depth)}${inner}${"</span>".repeat(depth)}</div>`;
+    })
+    .join("");
+  const env = createContentSandbox({ bodyHtml });
+  await env.send({ type: "translate" });
+
+  assert.equal(env.ports.length, depths.length, "每个宿主一次请求");
+  const payloads = env.ports.map((p) => p.posted.find((m) => m.type === "start").text);
+  depths.forEach((depth, i) => {
+    const expected = `${"<span>".repeat(depth)}kept english prose ${depth}.${"</span>".repeat(depth)}`;
+    assert.equal(payloads[i], expected, `深度 ${depth}：载荷只剩正文包裹链，正文完整`);
+  });
+  const allPayloads = payloads.join("");
+  assertPayloadExcludes(
+    allPayloads,
+    [
+      "DEEP_SCRIPT_MARK",
+      "DEEP_NOSCRIPT_MARK",
+      "DEEP_TEMPLATE_MARK",
+      "DEEP_COMMENT_MARK",
+      "<script",
+      "<noscript",
+      "<template",
+      "<!--",
+    ],
+    "任意深度都不含",
+  );
+  assert.equal(
+    env.body.innerHTML.includes("DEEP_SCRIPT_MARK_1") &&
+      env.body.innerHTML.includes("DEEP_COMMENT_MARK_1"),
+    true,
+    "页面真实 DOM 原样保留脚本与注释",
+  );
+  assert.equal(
+    env.body.querySelector(".translate-progress").textContent,
+    `0% 0/${depths.length}(${depths.length})`,
+  );
+
+  for (const port of env.ports) port.deliver("深链译文");
+  await env.clock.settle();
+  assert.equal(env.body.querySelectorAll(".translate-node").length, depths.length);
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+test("端口守门: 判空宿主不写「已处理」登记——随后填入正文，下一轮重扫仍为它发起请求", async () => {
+  // 媒体备用文本让资格判定通过、快照却在媒体步骤清空子树后为空：判空是唯一兜底
+  const env = createContentSandbox({
+    bodyHtml: `<div ${B}><svg viewBox="0 0 10 10"><text>chart label english</text></svg></div>`,
+  });
+  await env.send({ type: "translate" });
+
+  assert.equal(env.ports.length, 0, "剥离后为空的宿主不发起请求");
+  assert.equal(env.body.querySelectorAll(".translate-node").length, 0, "不建译文节点");
+  assert.equal(env.body.querySelector(".translate-progress").textContent, "0% 0/0(0)");
+
+  // 页面后来自行填充正文：该块未留「已处理」痕迹，下一轮重扫重新评估并成宿主
+  const host = env.body.firstElementChild;
+  host.innerHTML = `<span ${B}>Late english content</span>`;
+  await env.clock.settle();
+  await env.clock.advance(500); // 防抖到期 → 重扫
+  assert.equal(env.ports.length, 1, "空宿主未被登记：填充内容后重扫仍为它发起请求");
+  assert.equal(
+    env.ports[0].posted.find((m) => m.type === "start").text,
+    "<span>Late english content</span>",
+  );
+  assert.equal(env.body.querySelector(".translate-progress").textContent, "0% 0/1(1)");
+
+  env.ports[0].deliver("迟到译文");
+  await env.clock.settle();
+  assert.equal(env.body.querySelector(".translate-node").textContent, "迟到译文");
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "调度收敛");
+});
+
+// 本用例是「零变化」守门：修复前后都应保持绿（变异验证时它不参与转红），
+// 它锁的是本次改动不得顺带改动译文节点外观/位置/预览/错误/还原这些既有承诺。
+test("回归: 含非渲染内容的页面上，译文节点外观与位置、流式预览、错误提示、还原清理不变", async () => {
+  const env = createContentSandbox({
+    bodyHtml:
+      `<p ${B}>Alpha english host<script>var a = "SCRIPT_MARK";</script><!--COMMENT_MARK--></p>` +
+      `<p ${B}>Beta english host</p>`,
+  });
+  const before = env.body.innerHTML;
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 2, "两个宿主各一次请求");
+
+  // 外观与位置：挂宿主末尾、虚线下划线标记、既有样式逐项不变
+  const host = env.body.querySelectorAll("p")[0];
+  const node = host.querySelector(".translate-node");
+  assert.equal(node.parentElement, host, "译文节点挂在宿主下");
+  assert.equal(host.lastElementChild, node, "译文节点位于宿主末尾（原文一字不动）");
+  assert.equal(node.style.textDecoration, "underline dashed #4a90d9", "虚线下划线标记");
+  assert.equal(node.style.textUnderlineOffset, "3px");
+  assert.equal(node.style.color, "rgb(45, 109, 163)");
+  assert.equal(node.style.margin, "2px 0px");
+  assert.equal(node.style.padding, "1px 0px");
+  assert.equal(node.style.fontSize, "0.95em");
+  assert.equal(node.style.lineHeight, "1.4");
+  assert.equal(node.style.whiteSpace, "pre-wrap");
+  assert.equal(node.style.wordBreak, "break-word");
+
+  // 流式预览：剥标签纯文本直通上屏、预览期无子元素
+  env.ports[0].emit({ type: "delta", text: "\n你好 <b>世界</b>\n" });
+  await env.clock.settle();
+  assert.equal(node.textContent, "\n你好 世界\n", "流式预览剥标签且不做空白处理");
+  assert.equal(node.firstElementChild, null, "预览期无子元素");
+
+  // 定稿：净化后含标签 HTML 写入
+  env.ports[0].emit({ type: "done" });
+  await env.clock.settle();
+  assert.equal(node.innerHTML, "你好 <b>世界</b>", "定稿写入净化后的含标签 HTML");
+
+  // 错误提示：既有译文容器内斜体红字
+  env.ports[1].emit({ type: "error", message: "HTTP 500 boom" });
+  await env.clock.settle();
+  const failed = env.body.querySelectorAll("p")[1].querySelector(".translate-node");
+  assert.equal(failed.textContent, "翻译失败: HTTP 500 boom");
+  assert.equal(failed.style.fontStyle, "italic");
+  assert.equal(failed.style.color, "rgb(187, 51, 51)");
+  assert.equal(failed.style.fontSize, "0.9em");
+
+  // 还原清理：译文节点与徽标全清，页面回到翻译前逐字节一致（脚本与注释原样保留）
+  await env.send({ type: "revert" });
+  assert.equal(env.body.querySelectorAll(".translate-node").length, 0);
+  assert.equal(env.body.querySelectorAll(".translate-progress").length, 0);
+  assert.equal(env.body.innerHTML, before, "还原后页面与翻译前逐字节一致");
+  await env.clock.advance(1000);
+  assert.equal(env.clock.pending(), 0, "还原后调度清理干净");
+});
+
+// 重扫路径与首轮共用同一发现出口，因此这条既锁「重扫仍补翻」也锁「重扫同样只送正文」
+test("回归: 重扫为新增宿主补翻——新宿主同样只把正文送进请求", async () => {
+  const env = createContentSandbox({
+    bodyHtml: `<p ${B}>first english host<script>var a = "SCRIPT_MARK";</script></p>`,
+  });
+  await env.send({ type: "translate" });
+  assert.equal(env.ports.length, 1);
+  env.ports[0].deliver("首段译文");
+  await env.clock.settle();
+  assert.equal(env.body.querySelector(".translate-node").textContent, "首段译文");
+
+  // 页面动态新增含脚本与注释的宿主：防抖到期后重扫照常补翻
+  env.body.insertAdjacentHTML(
+    "beforeend",
+    `<p ${B}>late english host<script>var b = "SCRIPT_MARK";</script><!--COMMENT_MARK--></p>`,
+  );
+  await env.clock.settle();
+  await env.clock.advance(500);
+  assert.equal(env.ports.length, 2, "重扫为新增宿主发起请求");
+  assert.equal(
+    env.ports[1].posted.find((m) => m.type === "start").text,
+    "late english host",
+    "重扫路径同样剥离脚本与注释",
+  );
+
+  env.ports[1].deliver("迟到译文");
+  await env.clock.settle();
+  assert.equal(
+    env.body.querySelectorAll("p")[1].querySelector(".translate-node").textContent,
+    "迟到译文",
+  );
+  await env.clock.advance(1000);
   assert.equal(env.clock.pending(), 0, "调度收敛");
 });

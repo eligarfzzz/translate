@@ -4,7 +4,8 @@
 // 被测接缝：chrome.storage.sync 的存储形态 → 配置页 DOM 的可见结果
 // （输入框 value、status 文案）与保存后的存储内容。做法：
 //   1) 解析真实的 options.html（字段名与表单结构取自生产 markup，不另写副本）
-//   2) 注入 chrome.storage 替身：内存键值表，保存后可直接读回断言
+//   2) 注入 chrome 替身：storage 内存键值表（保存后可直接读回断言）+
+//      runtime.sendMessage（可注入本次回应，发出的消息按序记入可观测列表）
 //   3) 以查询串破 ESM 缓存，每个用例拿到一个干净的模块实例——options.js
 //      在 import 时即读 DOM 并触发一次异步回填，模块级状态不可跨用例复用
 //      （见工单 01 Comments）
@@ -59,20 +60,35 @@ async function settle(rounds = 4) {
   for (let i = 0; i < rounds; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
-// createOptionsSandbox({ stored }): stored 为 sync 存储里 config 的原始值，
-// null 表示存储里没有 config 键。返回：
+// createOptionsSandbox({ stored, clearCacheResult }): stored 为 sync 存储里 config 的
+// 原始值，null 表示存储里没有 config 键；clearCacheResult 为「清空缓存」按钮发出
+// runtime 消息后收到的回应（缺省 = 空库成功）。返回：
 //   dom/doc/form/status、field(name)（输入框元素）、submit()（提交表单并等写完存储）、
 //   restore(group)（点该组的「恢复默认」，等 click 处理器跑完）、
+//   clearCache()（点「清空缓存」，等 click 处理器跑完）、
 //   syncWrites（sync 区域的写操作记录，未写过 = 空数组）、
+//   sentMessages（runtime.sendMessage 发出的消息，按序记录）、
 //   storedConfig()（存储里 config 的当前值，键被删除 = null）、dispose()（还原全局注入）
-async function createOptionsSandbox({ stored = null } = {}) {
+async function createOptionsSandbox({
+  stored = null,
+  clearCacheResult = { ok: true, removed: 0 },
+} = {}) {
   const dom = new JSDOM(OPTIONS_HTML, { url: "https://example.test/options.html" });
   const doc = dom.window.document;
 
   const sync = createStorageArea();
   if (stored !== null) sync.data.config = stored;
   const local = createStorageArea(); // 日志落盘内存态（debug.js 通道）
-  const chrome = { storage: { sync, local } };
+  const sentMessages = [];
+  const chrome = {
+    storage: { sync, local },
+    runtime: {
+      sendMessage: async (msg) => {
+        sentMessages.push(msg);
+        return clearCacheResult;
+      },
+    },
+  };
 
   // 模块代码在 Node 里执行：document/chrome 取自全局注入。
   // options.js 的 flash 用全局 setTimeout——换成只登记的假计时器，断言即刻可读。
@@ -111,7 +127,12 @@ async function createOptionsSandbox({ stored = null } = {}) {
       doc.querySelector(`[data-restore="${group}"]`).click();
       await settle();
     },
+    async clearCache() {
+      doc.getElementById("clear-cache").click();
+      await settle();
+    },
     syncWrites: sync.writes,
+    sentMessages,
     storedConfig: () => ("config" in sync.data ? sync.data.config : null),
     dispose() {
       globalThis.document = saved.document;

@@ -213,6 +213,8 @@ function createContentSandbox({ bodyHtml = "", config = null } = {}) {
   const bus = createMessageBus();
   // 会话若自注册 onMessage 只记录、不派发：非空即为「加载器 + 会话双份监听」回归
   const selfRegistered = [];
+  // content → background 的一次性消息（runtime.sendMessage，如 cleanup-cache）记录
+  const sentMessages = [];
 
   // 手动时钟接入注入文档所属 window：会话的动画与防抖计时器全部经此排队；
   // 同一时钟也作为会话的耗时时间源 now 注入（见下方 createContentSession），
@@ -226,6 +228,11 @@ function createContentSandbox({ bodyHtml = "", config = null } = {}) {
     runtime: {
       onMessage: { addListener: (fn) => selfRegistered.push(fn) },
       connect: hub.connect,
+      // 一次性消息替身：与真实 runtime.sendMessage 同形返回 Promise（MV3），
+      // 载荷记录供断言（短文本缓存的 cleanup-cache 触发经此通道，ADR-0008 D7）
+      sendMessage: async (msg) => {
+        sentMessages.push(msg);
+      },
     },
     storage: {
       // debug.js 环形日志落盘：内存态即可
@@ -271,6 +278,8 @@ function createContentSandbox({ bodyHtml = "", config = null } = {}) {
     peakInflightPorts: () => hub.peakInflight,
     // 会话自注册的 onMessage 监听数（应恒为 0：派发权只属加载器）
     selfRegisteredListeners: () => selfRegistered.length,
+    // content 经 runtime.sendMessage 发出的一次性消息（按序）
+    sentMessages,
     send,
   };
 }

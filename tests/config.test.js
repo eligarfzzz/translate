@@ -1,5 +1,7 @@
 // 工单 01（empty-means-unset）：配置核心归一化——空即未设置。
 // 工单 01（session-reuse）：布尔字段（reuseSession）沿用同一批三路径断言——只有 true 落盘。
+// 工单 01（short-text-cache）：四缓存键进默认值表；布尔判空镜像推广为「只存非默认面」——
+// 默认开的 cacheEnabled 只有显式 false 落盘，默认面与其余形态一律删键回退默认。
 // 核心测试形态：同一批「默认值 + 原始值」用例同时喂归一化入口、读路径（mergeConfig）
 // 与写路径（pruneConfig），断言三者对「空 / 非空」的判断完全一致——判空不漂移的自动化保障。
 // 工单 04：规则的解释（缺占位符判定、占位文字与示例清单）同处本模块，并加守门断言。
@@ -30,6 +32,10 @@ const DEFAULTS_SNAPSHOT = () => ({
   reuseSession: TRANSLATE_CONFIG.reuseSession,
   promptTemplate: DEFAULT_PROMPT_TEMPLATE,
   extra: "",
+  cacheEnabled: TRANSLATE_CONFIG.cacheEnabled,
+  cacheMaxEntries: TRANSLATE_CONFIG.cacheMaxEntries,
+  cacheTtlDays: TRANSLATE_CONFIG.cacheTtlDays,
+  cacheMaxBytes: TRANSLATE_CONFIG.cacheMaxBytes,
 });
 
 // [字段, 原始值, 期望]：期望 undefined = 空（不落盘、读取回退默认）；否则为归一化后的值。
@@ -86,6 +92,39 @@ const CASES = [
   ["reuseSession", "", undefined],
   ["reuseSession", [], undefined],
   ["reuseSession", {}, undefined],
+  // ---- 布尔字段（短文本缓存开关，默认开）：镜像判空——只存非默认面 false，其余一律为空 ----
+  ["cacheEnabled", false, false],
+  ["cacheEnabled", true, undefined],
+  ["cacheEnabled", "true", undefined],
+  ["cacheEnabled", "false", undefined],
+  ["cacheEnabled", 1, undefined],
+  ["cacheEnabled", null, undefined],
+  ["cacheEnabled", undefined, undefined],
+  ["cacheEnabled", "", undefined],
+  ["cacheEnabled", [], undefined],
+  ["cacheEnabled", {}, undefined],
+  // ---- 短文本缓存数值键：沿用正整数规则（数字串可接受） ----
+  ["cacheMaxEntries", 5000, 5000],
+  ["cacheMaxEntries", "5000", 5000],
+  ["cacheMaxEntries", 0, undefined],
+  ["cacheMaxEntries", -1, undefined],
+  ["cacheMaxEntries", 1.5, undefined],
+  ["cacheMaxEntries", "", undefined],
+  ["cacheMaxEntries", "abc", undefined],
+  ["cacheTtlDays", 7, 7],
+  ["cacheTtlDays", "7", 7],
+  ["cacheTtlDays", 0, undefined],
+  ["cacheTtlDays", -1, undefined],
+  ["cacheTtlDays", 1.5, undefined],
+  ["cacheTtlDays", "", undefined],
+  ["cacheTtlDays", "abc", undefined],
+  ["cacheMaxBytes", 64, 64],
+  ["cacheMaxBytes", "64", 64],
+  ["cacheMaxBytes", 0, undefined],
+  ["cacheMaxBytes", -1, undefined],
+  ["cacheMaxBytes", 1.5, undefined],
+  ["cacheMaxBytes", "", undefined],
+  ["cacheMaxBytes", "abc", undefined],
   // ---- 提示词模板：字符串规则 + 必须包含 {host} ----
   ["promptTemplate", null, undefined],
   ["promptTemplate", "", undefined],
@@ -428,6 +467,87 @@ test("reuseSession: 表单 true 落盘、false 删键，prune → merge 往返�
     { targetLang: "English" },
     "未勾选只删自己，其余键照常落盘",
   );
+});
+
+// ---------------- 工单 01（short-text-cache）：短文本缓存四键与布尔镜像判空 ----------------
+
+test("短文本缓存四键默认值：开关默认开，三个数值键为正整数默认", () => {
+  assert.equal(TRANSLATE_CONFIG.cacheEnabled, true, "缓存默认开");
+  assert.equal(TRANSLATE_CONFIG.cacheMaxEntries, 10000);
+  assert.equal(TRANSLATE_CONFIG.cacheTtlDays, 30);
+  assert.equal(TRANSLATE_CONFIG.cacheMaxBytes, 30);
+});
+
+// 镜像布尔规则的完整边界：默认开的字段只有显式 false 落盘；存储缺键、默认面 true、
+// 垃圾值（含字符串 "false"）都回退默认 true——运行时配置里恒是一个确定的布尔值。
+test("cacheEnabled: 默认开；只有存储里的 false 生效，其余值一律判空回退 true", async () => {
+  for (const raw of [null, undefined, true, "true", "false", 1, 0, "", "  ", [], {}]) {
+    const what = `cacheEnabled=${String(raw)}`;
+    assert.equal(
+      Object.hasOwn(sanitizeStored(TRANSLATE_CONFIG, { cacheEnabled: raw }), "cacheEnabled"),
+      false,
+      `归一化判空删键：${what}`,
+    );
+    assert.equal(
+      mergeConfig(TRANSLATE_CONFIG, { cacheEnabled: raw }).cacheEnabled,
+      true,
+      `读路径回退默认 true：${what}`,
+    );
+  }
+
+  const stored = { cacheEnabled: false };
+  assert.deepEqual(sanitizeStored(TRANSLATE_CONFIG, stored), stored, "false 落盘");
+  assert.equal(mergeConfig(TRANSLATE_CONFIG, stored).cacheEnabled, false, "false 生效");
+
+  // 存储缺键（含整个 config 键缺失）：运行时仍是确定的布尔值
+  for (const raw of [null, {}]) {
+    assert.equal(typeof mergeConfig(TRANSLATE_CONFIG, raw).cacheEnabled, "boolean");
+    assert.equal(mergeConfig(TRANSLATE_CONFIG, raw).cacheEnabled, true);
+  }
+  assert.equal(typeof (await loadConfig()).cacheEnabled, "boolean", "loadConfig 恒给布尔值");
+  assert.equal((await loadConfig()).cacheEnabled, true);
+});
+
+// 写路径往返：取消勾选（表单 false）→ 载荷含该键 → 读回 false；勾选回默认态（表单 true）→ 删键 → 读回默认 true。
+test("cacheEnabled: 表单 false 落盘、true 删键，prune → merge 往返回到同一个布尔", () => {
+  const unchecked = pruneConfig(TRANSLATE_CONFIG, { cacheEnabled: false });
+  assert.deepEqual(unchecked, { cacheEnabled: false }, "取消勾选 → 载荷含该键（非默认面）");
+  assert.equal(mergeConfig(TRANSLATE_CONFIG, unchecked).cacheEnabled, false, "往返仍是 false");
+
+  const checked = pruneConfig(TRANSLATE_CONFIG, { cacheEnabled: true });
+  assert.deepEqual(checked, {}, "勾选 = 默认态 → 删键（载荷里没有该键）");
+  assert.equal(mergeConfig(TRANSLATE_CONFIG, checked).cacheEnabled, true, "往返回到默认 true");
+  assert.deepEqual(
+    pruneConfig(TRANSLATE_CONFIG, { cacheEnabled: true, targetLang: "English" }),
+    { targetLang: "English" },
+    "默认态只删自己，其余键照常落盘",
+  );
+});
+
+// 三个数值键与并发上限同一条正整数规则：合法整数落盘（数字串转 number），
+// 0 / 负数 / 小数 / 空串 / 非数字串一律删键，prune → merge 往返回到默认。
+test("短文本缓存数值键: 合法整数落盘、非法删键，prune → merge 往返回到默认", () => {
+  const payload = pruneConfig(TRANSLATE_CONFIG, {
+    cacheMaxEntries: "5000",
+    cacheTtlDays: 7,
+    cacheMaxBytes: " 64 ",
+  });
+  assert.deepEqual(payload, { cacheMaxEntries: 5000, cacheTtlDays: 7, cacheMaxBytes: 64 });
+  const merged = mergeConfig(TRANSLATE_CONFIG, payload);
+  assert.equal(merged.cacheMaxEntries, 5000);
+  assert.equal(merged.cacheTtlDays, 7);
+  assert.equal(merged.cacheMaxBytes, 64);
+
+  const cleared = pruneConfig(TRANSLATE_CONFIG, {
+    cacheMaxEntries: "0",
+    cacheTtlDays: "",
+    cacheMaxBytes: "1.5",
+  });
+  assert.deepEqual(cleared, {}, "0 / 空串 / 小数 → 全部删键");
+  const back = mergeConfig(TRANSLATE_CONFIG, cleared);
+  assert.equal(back.cacheMaxEntries, TRANSLATE_CONFIG.cacheMaxEntries, "删键回退默认");
+  assert.equal(back.cacheTtlDays, TRANSLATE_CONFIG.cacheTtlDays);
+  assert.equal(back.cacheMaxBytes, TRANSLATE_CONFIG.cacheMaxBytes);
 });
 
 test("readStored：取 sync 存储里 config 的原始对象，缺失返回 null", async () => {

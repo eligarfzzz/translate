@@ -1,10 +1,10 @@
 // ============================================================
-// background（service worker）集成测试（票 03：会话链与双触发器重试）
+// background（service worker）集成测试
 //
 // 被测接缝：content → background 的 start 消息（text + 可选 history）→
 // 上游 fetch 请求体（messages 组装）与 bg → content 的回发消息
-// （delta / restart / done / error）。
-// 全部走 tests/helpers/background-sandbox.js 基建（chrome/fetch/端口替身）。
+// （delta / restart / done / error）；cleanup-cache 消息 → 缓存清理。
+// 全部走 tests/helpers/background-sandbox.js 基建（chrome/fetch/端口/IDB 替身）。
 // ============================================================
 
 import test from "node:test";
@@ -15,8 +15,11 @@ import {
   sseResponse,
   httpErrorResponse,
   ofType,
+  DEFAULT_CONFIG,
 } from "./helpers/background-sandbox.js";
 import { DEFAULT_PROMPT_TEMPLATE, isHostWrapped, renderPrompt, wrapHost } from "../src/prompt.js";
+import { createCacheStore, cacheFingerprint } from "../src/cache-store.js";
+import { mergeConfig, TRANSLATE_CONFIG } from "../src/config.js";
 
 const TEMPLATE_FIRST_LINE = DEFAULT_PROMPT_TEMPLATE.split("\n")[0];
 
@@ -85,14 +88,22 @@ test("消息组装: 链中 = 历史对（链序最老在前）+ 只有新文本�
 
 test("消息组装: 空/非法 history 一律按链首（纵深防御）", async () => {
   const env = await createBackgroundSandbox({
-    responses: [sseResponse(["<html>甲</html>"]), sseResponse(["<html>乙</html>"])],
+    responses: [
+      sseResponse(["<html>甲</html>"]),
+      sseResponse(["<html>乙</html>"]),
+      sseResponse(["<html>丙</html>"]),
+      sseResponse(["<html>丁</html>"]),
+    ],
   });
-  for (const history of [[], "junk", [{ html: "<p>a</p>" }], [null]]) {
+  const histories = [[], "junk", [{ html: "<p>a</p>" }], [null]];
+  for (let i = 0; i < histories.length; i++) {
     const port = env.connect();
-    await env.start(port, { text: "<p>x</p>", history });
+    // 每轮换不同原文：同文重发会命中缓存而不再 fetch（短文本缓存特性），断言将落空
+    await env.start(port, { text: `<p>x${i}</p>`, history: histories[i] });
     const messages = env.fetchCalls.at(-1).body.messages;
-    assert.equal(messages.length, 1, `history=${JSON.stringify(history)} → 链首形态`);
+    assert.equal(messages.length, 1, `history=${JSON.stringify(histories[i])} → 链首形态`);
   }
+  assert.equal(env.fetchCalls.length, histories.length, "每次 start 都真实走到上游");
 });
 
 // ============================================================
@@ -279,4 +290,364 @@ test("配置守卫: 未配置端点/密钥/模型时经既有错误通道回告�
   assert.equal(env.fetchCalls.length, 0, "未配置不发请求（历史字段不改变守卫）");
   assert.equal(ofType(port, "error").length, 1);
   assert.equal(ofType(port, "restart").length, 0);
+});
+
+// ============================================================
+// 短文本缓存（ADR-0008；spec D2/D3/D4/D5/D7/D10/D11）：
+// 查询门槛 → 命中回放 → 成功写入 → 清理消息 → 降级 → 同轮不合并
+// ============================================================
+
+// 与 background 当次 loadConfig 同源的指纹（直种/直查缓存用）：
+// 沙箱配置只叠在 DEFAULT_CONFIG 上，指纹五项之外的键不影响结果
+function testFingerprint() {
+  return cacheFingerprint(mergeConfig(TRANSLATE_CONFIG, DEFAULT_CONFIG));
+}
+
+// 与 background 共用同一假 IndexedDB 的种子存储：测试直接写库/验库，
+// 与 background 模块内的 store 单例读写同一份数据
+function seedStore(env) {
+  return createCacheStore({ indexedDB: env.fakeIdb.indexedDB });
+}
+
+test("缓存: 未命中成功后写入；下一同键 start 回放 delta 全文 + done{cached:true}（零 fetch）", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [sseResponse(["<html><p>你好</p></html>"])],
+  });
+
+  const first = env.connect();
+  await env.start(first, { text: "<p>hi</p>" });
+  assert.equal(env.fetchCalls.length, 1, "首诊未命中：走上游");
+  assert.deepEqual(
+    ofType(first, "done"),
+    [{ type: "done" }],
+    "真翻落定的 done 不带 cached 字段（协议只新增可选标志）",
+  );
+
+  const second = env.connect();
+  await env.start(second, { text: "<p>hi</p>" });
+  assert.equal(env.fetchCalls.length, 1, "命中回放：不再发上游请求");
+  assert.deepEqual(
+    second.posted,
+    [
+      { type: "delta", text: "<html><p>你好</p></html>" },
+      { type: "done", cached: true },
+    ],
+    "恰好一条 delta（缓存原始回显全文，含包装）+ 一条 done{cached:true}，无 restart/error",
+  );
+});
+
+test('缓存写入: 失败与空回显（"" / <html></html>）一律不写', async () => {
+  const env = await createBackgroundSandbox({
+    responses: [
+      httpErrorResponse(500, "server boom"), // <p>a</p> 失败
+      sseResponse([]), // <p>b</p> 零 delta（空回显）
+      sseResponse(["<html></html>"]), // <p>c</p> 空壳回显
+      sseResponse(["<html><p>甲</p></html>"]),
+      sseResponse(["<html><p>乙</p></html>"]),
+      sseResponse(["<html><p>丙</p></html>"]),
+    ],
+  });
+  const texts = ["<p>a</p>", "<p>b</p>", "<p>c</p>"];
+
+  const first = texts.map(() => env.connect());
+  for (let i = 0; i < texts.length; i++) await env.start(first[i], { text: texts[i] });
+  assert.equal(env.fetchCalls.length, 3, "失败/空回显各走一次上游");
+  assert.equal(ofType(first[0], "error").length, 1, "失败走既有错误通道");
+
+  // 同键再来：若曾写入，这里会命中回放而不再 fetch
+  const second = texts.map(() => env.connect());
+  for (let i = 0; i < texts.length; i++) await env.start(second[i], { text: texts[i] });
+  assert.equal(env.fetchCalls.length, 6, "三者都没写缓存：同键再来仍走上游");
+  for (const port of second) {
+    assert.deepEqual(ofType(port, "done"), [{ type: "done" }], "真翻落定，非缓存回放");
+  }
+});
+
+test("缓存隔离: 改配置（指纹五项之一）后旧条目不再命中，改回即恢复", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [
+      sseResponse(["<html><p>你好</p></html>"]),
+      sseResponse(["<html><p>您好</p></html>"]),
+    ],
+  });
+  await env.start(env.connect(), { text: "<p>hi</p>" });
+  assert.equal(env.fetchCalls.length, 1);
+
+  env.setConfig({ model: "other-model" }); // 指纹五项之一
+  await env.start(env.connect(), { text: "<p>hi</p>" });
+  assert.equal(env.fetchCalls.length, 2, "指纹变化：旧条目不再命中，重走上游");
+
+  env.setConfig({ model: DEFAULT_CONFIG.model }); // 改回
+  const port = env.connect();
+  await env.start(port, { text: "<p>hi</p>" });
+  assert.equal(env.fetchCalls.length, 2, "改回后旧条目又命中");
+  assert.deepEqual(
+    port.posted,
+    [
+      { type: "delta", text: "<html><p>你好</p></html>" },
+      { type: "done", cached: true },
+    ],
+    "命中的是原配置写入的旧条目",
+  );
+});
+
+test("缓存阈值: 骨架超 cacheMaxBytes 的原文不查也不写", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [
+      sseResponse(["<html><p>长文甲</p></html>"]),
+      sseResponse(["<html><p>长文乙</p></html>"]),
+    ],
+  });
+  const longText = `<p>${"x".repeat(40)}</p>`; // 47 UTF-8 字节 > 默认阈值 30
+  // 直接向库里种一条同键条目：查询若发生必命中——用它看住「不查」
+  await seedStore(env).put(testFingerprint(), longText, "<html><p>预置回声</p></html>", Date.now());
+
+  const first = env.connect();
+  await env.start(first, { text: longText });
+  assert.equal(env.fetchCalls.length, 1, "超阈值：库里有同键条目也不查");
+  assert.deepEqual(ofType(first, "done"), [{ type: "done" }]);
+
+  const second = env.connect();
+  await env.start(second, { text: longText });
+  assert.equal(env.fetchCalls.length, 2, "超阈值：成功回显也不写，同键再来仍走上游");
+  assert.deepEqual(ofType(second, "done"), [{ type: "done" }]);
+});
+
+test("缓存开关: cacheEnabled 关闭时不查、不写", async () => {
+  const env = await createBackgroundSandbox({
+    config: { cacheEnabled: false },
+    responses: [
+      sseResponse(["<html><p>你好</p></html>"]),
+      sseResponse(["<html><p>您好</p></html>"]),
+    ],
+  });
+  // 库里先种同键条目：开关关时即使能命中也不得查
+  await seedStore(env).put(
+    testFingerprint(),
+    "<p>hi</p>",
+    "<html><p>预置回声</p></html>",
+    Date.now(),
+  );
+
+  const first = env.connect();
+  await env.start(first, { text: "<p>hi</p>" });
+  assert.equal(env.fetchCalls.length, 1, "开关关：不查");
+  assert.deepEqual(ofType(first, "done"), [{ type: "done" }]);
+
+  const second = env.connect();
+  await env.start(second, { text: "<p>hi</p>" });
+  assert.equal(env.fetchCalls.length, 2, "开关关：不写，同键再来仍走上游");
+  assert.deepEqual(ofType(second, "done"), [{ type: "done" }]);
+});
+
+test("清理消息: cleanup-cache 删除过期条目、保留新鲜条目", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [sseResponse(["<html><p>旧文新译</p></html>"])],
+  });
+  const seed = seedStore(env);
+  const fp = testFingerprint();
+  await seed.put(fp, "<p>old</p>", "<html><p>旧回声</p></html>", 0); // 1970：必过期
+  await seed.put(fp, "<p>new</p>", "<html><p>新回声</p></html>", Date.now());
+
+  await env.sendRuntimeMessage({ type: "cleanup-cache" });
+
+  const stale = env.connect();
+  await env.start(stale, { text: "<p>old</p>" });
+  assert.equal(env.fetchCalls.length, 1, "过期条目已删：同键 miss 走上游");
+  assert.deepEqual(ofType(stale, "done"), [{ type: "done" }]);
+
+  const fresh = env.connect();
+  await env.start(fresh, { text: "<p>new</p>" });
+  assert.equal(env.fetchCalls.length, 1, "新鲜条目存活：命中不发请求");
+  assert.deepEqual(fresh.posted, [
+    { type: "delta", text: "<html><p>新回声</p></html>" },
+    { type: "done", cached: true },
+  ]);
+});
+
+test("清理消息: cleanup-cache 超上限按最久未用淘到上限", async () => {
+  const env = await createBackgroundSandbox({
+    config: { cacheMaxEntries: 1 },
+    responses: [sseResponse(["<html><p>补译</p></html>"])],
+  });
+  const seed = seedStore(env);
+  const fp = testFingerprint();
+  const now = Date.now();
+  await seed.put(fp, "<p>a</p>", "<html><p>回声甲</p></html>", now - 1000); // 较旧
+  await seed.put(fp, "<p>b</p>", "<html><p>回声乙</p></html>", now);
+
+  await env.sendRuntimeMessage({ type: "cleanup-cache" });
+
+  const evicted = env.connect();
+  await env.start(evicted, { text: "<p>a</p>" });
+  assert.equal(env.fetchCalls.length, 1, "最久未用的被淘汰");
+  assert.deepEqual(ofType(evicted, "done"), [{ type: "done" }]);
+
+  const kept = env.connect();
+  await env.start(kept, { text: "<p>b</p>" });
+  assert.equal(env.fetchCalls.length, 1, "较新的保留并命中");
+  assert.deepEqual(kept.posted, [
+    { type: "delta", text: "<html><p>回声乙</p></html>" },
+    { type: "done", cached: true },
+  ]);
+});
+
+test("清理消息: 缓存关闭时不执行清理", async () => {
+  const env = await createBackgroundSandbox({ config: { cacheEnabled: false }, responses: [] });
+  const seed = seedStore(env);
+  await seed.put(testFingerprint(), "<p>old</p>", "<html><p>旧回声</p></html>", 0); // 必过期
+
+  await env.sendRuntimeMessage({ type: "cleanup-cache" });
+
+  assert.deepEqual(
+    await seed.get(testFingerprint(), "<p>old</p>", Date.now()),
+    { echo: "<html><p>旧回声</p></html>" },
+    "过期条目仍在：缓存关时清理不执行",
+  );
+  assert.equal(env.fetchCalls.length, 0);
+});
+
+test("缓存降级: IndexedDB 故障记日志，翻译消息次序与无缓存逐字节一致", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [sseResponse(["<html><p>你好", "</p></html>"])],
+  });
+  // 请求级故障：background 的 store 单例复用已打开的连接（生产姿势），failOpen 只对
+  // 首次打开生效、随用例顺序漂移；open 失败的降级由 cache-store 单测覆盖
+  env.fakeIdb.failRequests(new Error("idb boom"));
+
+  const port = env.connect();
+  await env.start(port, { text: "<p>hi</p>" });
+
+  assert.deepEqual(
+    port.posted,
+    [
+      { type: "delta", text: "<html><p>你好" },
+      { type: "delta", text: "</p></html>" },
+      { type: "done" },
+    ],
+    "delta/done 次序与载荷与无缓存逐字节一致（无 cached、无 error）",
+  );
+  assert.equal(env.fetchCalls.length, 1, "缓存故障不阻断上游请求");
+  assert.ok(
+    env.errorLines.some((line) => line.includes("cache get failed") && line.includes("idb boom")),
+    "读故障已记日志",
+  );
+  assert.ok(
+    env.errorLines.some((line) => line.includes("cache put failed") && line.includes("idb boom")),
+    "写故障已记日志",
+  );
+});
+
+test("同轮相同原文不合并（D11）: 并发同文各发一次请求，写入落定后下一轮命中", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [sseResponse(["<html><p>甲</p></html>"]), sseResponse(["<html><p>乙</p></html>"])],
+  });
+  const p1 = env.connect();
+  const p2 = env.connect();
+  // 并发发出（不等各自落定）：两个查询都发生在任何写入之前
+  p1.emit({ type: "start", text: "<p>go</p>" });
+  p2.emit({ type: "start", text: "<p>go</p>" });
+  await env.settle();
+
+  assert.equal(env.fetchCalls.length, 2, "同轮相同原文不在途合并：各付一次上游请求");
+  for (const p of [p1, p2]) {
+    assert.deepEqual(ofType(p, "done"), [{ type: "done" }], "两轮都是真翻落定");
+  }
+
+  const p3 = env.connect();
+  await env.start(p3, { text: "<p>go</p>" });
+  assert.equal(env.fetchCalls.length, 2, "写入落定后的下一轮直接命中");
+  assert.deepEqual(ofType(p3, "done"), [{ type: "done", cached: true }]);
+});
+
+// ============================================================
+// 清空消息（clear-cache，cache-manual-clear 票 01 / spec D1/D4/D5/D6/D7）：
+// 整库清空 + 异步回应 { ok, removed }；与 cacheEnabled 无关（不读配置）
+// ============================================================
+
+test("清空消息: clear-cache 清空整库（含异指纹条目）并回应 { ok: true, removed: 清空前条数 }", async () => {
+  const env = await createBackgroundSandbox({ responses: [] });
+  const seed = seedStore(env);
+  const fp = testFingerprint();
+  const fpOther = cacheFingerprint(
+    mergeConfig(TRANSLATE_CONFIG, { ...DEFAULT_CONFIG, model: "other-model" }),
+  );
+  const now = Date.now();
+  await seed.put(fp, "<p>a</p>", "<html><p>回声甲</p></html>", now);
+  await seed.put(fp, "<p>b</p>", "<html><p>回声乙</p></html>", now);
+  await seed.put(fpOther, "<p>c</p>", "<html><p>回声丙</p></html>", now); // 异指纹同属整库清空范围
+
+  const response = await env.sendRuntimeMessage({ type: "clear-cache" });
+
+  assert.deepEqual(response, { ok: true, removed: 3 }, "回应清空前的条数");
+  assert.equal(await seed.get(fp, "<p>a</p>", now), null, "a 已清空");
+  assert.equal(await seed.get(fp, "<p>b</p>", now), null, "b 已清空");
+  assert.equal(await seed.get(fpOther, "<p>c</p>", now), null, "不按指纹筛选");
+});
+
+test("清空消息: cacheEnabled 关闭时照样清空（D6：手动清空不读开关）", async () => {
+  const env = await createBackgroundSandbox({ config: { cacheEnabled: false }, responses: [] });
+  const seed = seedStore(env);
+  await seed.put(testFingerprint(), "<p>a</p>", "<html><p>回声甲</p></html>", Date.now());
+
+  const response = await env.sendRuntimeMessage({ type: "clear-cache" });
+
+  assert.deepEqual(response, { ok: true, removed: 1 }, "开关关着照清并回报条数");
+  assert.equal(await seed.get(testFingerprint(), "<p>a</p>", Date.now()), null, "库已清空");
+});
+
+test("清空消息: IndexedDB 故障时回应 { ok: false, removed: 0 } 而不是抛错", async () => {
+  const env = await createBackgroundSandbox({ responses: [] });
+  const seed = seedStore(env);
+  const now = Date.now();
+  await seed.put(testFingerprint(), "<p>a</p>", "<html><p>回声甲</p></html>", now);
+
+  env.fakeIdb.failRequests(new Error("idb boom"));
+  const response = await env.sendRuntimeMessage({ type: "clear-cache" });
+
+  assert.deepEqual(response, { ok: false, removed: 0 }, "故障如实回报失败态");
+  assert.equal(
+    env.errorLines.filter(
+      (line) => line.includes("cache clear failed") && line.includes("idb boom"),
+    ).length,
+    1,
+    "失败留痕恰一条：store 经注入的日志回调（DBG.error 通道）记录，background 不重复记",
+  );
+  env.fakeIdb.clearFailures();
+  assert.deepEqual(
+    await seed.get(testFingerprint(), "<p>a</p>", now),
+    { echo: "<html><p>回声甲</p></html>" },
+    "失败的清空不损数据",
+  );
+});
+
+test("清空消息: 清空后同一原文重走上游，落定形态与未命中路径逐字节一致（不再有 done{cached:true}）", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [
+      sseResponse(["<html><p>你好</p></html>"]),
+      sseResponse(["<html><p>您好</p></html>"]),
+    ],
+  });
+
+  const first = env.connect();
+  await env.start(first, { text: "<p>hi</p>" });
+  assert.equal(env.fetchCalls.length, 1, "首诊未命中走上游并写入缓存");
+  assert.deepEqual(ofType(first, "done"), [{ type: "done" }]);
+
+  const cached = env.connect();
+  await env.start(cached, { text: "<p>hi</p>" });
+  assert.equal(env.fetchCalls.length, 1, "清空前同键命中缓存，不再发请求");
+  assert.deepEqual(ofType(cached, "done"), [{ type: "done", cached: true }]);
+
+  const response = await env.sendRuntimeMessage({ type: "clear-cache" });
+  assert.deepEqual(response, { ok: true, removed: 1 });
+
+  const after = env.connect();
+  await env.start(after, { text: "<p>hi</p>" });
+  assert.equal(env.fetchCalls.length, 2, "清空后同一原文重新走上游请求");
+  assert.deepEqual(
+    after.posted,
+    [{ type: "delta", text: "<html><p>您好</p></html>" }, { type: "done" }],
+    "落定形态与未命中路径逐字节一致：无 cached 标志、无 restart/error",
+  );
 });

@@ -1,5 +1,6 @@
 // 工单 04：host-discovery 测试（jsdom）——
 // 剥码提取 / 资格判定（纯码跳过+常规保留标签）/ DFS 发现 / 快照序列化 / 净化
+// 票 01（feed-strip-non-rendering）：非渲染标签与注释剥离、剥离后为空则不产生条目
 import { test } from "node:test";
 import assert from "node:assert";
 import { JSDOM } from "jsdom";
@@ -572,4 +573,219 @@ test("排序: 正文→未标记→边缘，档内保持文档序", () => {
   assert.ok(entries[1].html.includes("main second"));
   assert.ok(entries[2].html.includes("unmarked"));
   assert.ok(entries[3].html.includes("footer"));
+});
+
+// ============ 11. 非渲染标签与注释剥离、剥离后为空则不产生条目（票 01） ============
+// 断言只落在快照返回的字符串与宿主发现出口的条目上；层数只是构造手段。
+
+// 非渲染标签清单逐项：内容标记 + 元素自身都不得出现在快照里
+const NON_RENDERED_CASES = [
+  ["script", '<script>var mark = "SCRIPT_MARK";</script>', "SCRIPT_MARK"],
+  ["style", "<style>.mark { color: red } /* STYLE_MARK */</style>", "STYLE_MARK"],
+  ["iframe", '<iframe src="IFRAME_MARK"></iframe>', "IFRAME_MARK"],
+  ["template", "<template><span>TEMPLATE_MARK</span></template>", "TEMPLATE_MARK"],
+  ["noscript", "<noscript><span>NOSCRIPT_MARK</span></noscript>", "NOSCRIPT_MARK"],
+  ["link", '<link rel="stylesheet" href="LINK_MARK.css">', "LINK_MARK"],
+  ["meta", '<meta name="x" content="META_MARK">', "META_MARK"],
+  ["base", '<base href="BASE_MARK/">', "BASE_MARK"],
+];
+
+// 剥离后只剩空白的各形态（实体经文本内容取用后已解码）
+const BLANK_HOST_FORMS = [
+  `<span ${B}> </span>`,
+  `<div ${B}><br></div>`,
+  `<div ${B}><img src="BLANK_IMG_MARK.png"></div>`,
+  `<div ${B}>   \n\t  </div>`,
+  `<div ${B}>&nbsp;</div>`,
+  `<div ${B}>&ensp;&ensp;</div>`,
+  `<div ${B}>&#8203;&#8203;</div>`,
+  `<div ${B}>&#8204;&#8205;</div>`,
+];
+
+test("剥离: 非渲染标签逐项删除——清单内每项连同其内容都不进快照", () => {
+  const { hd, doc } = makeEnv("");
+  for (const [tag, html, marker] of NON_RENDERED_CASES) {
+    const el = doc.createElement("div");
+    el.innerHTML = `Before ${html} After`;
+    const snap = hd.snapshotHtml(el);
+    assert.equal(snap.includes(marker), false, `${tag}: 内容应被剥离（${marker}）`);
+    assert.equal(snap.includes(`<${tag}`), false, `${tag}: 元素自身应被剥离`);
+    assert.ok(snap.includes("Before") && snap.includes("After"), `${tag}: 周边正文保留`);
+  }
+});
+
+test("剥离: template 的 content 内文本/属性/媒体数据/脚本都不出现在快照里", () => {
+  const { hd, doc } = makeEnv("");
+  const el = doc.createElement("div");
+  el.innerHTML =
+    'Keep <template data-tpl="TPL_ATTR">' +
+    '<span data-x="1">TEMPLATE_TEXT_MARK</span>' +
+    '<img src="data:image/png;base64,TPL_MEDIA_MARK">' +
+    '<script>var s = "TPL_SCRIPT_MARK";</script>' +
+    "</template> tail";
+  const snap = hd.snapshotHtml(el);
+  assert.equal(snap, "Keep  tail", "删 template 元素即连带 content 一并消失");
+  for (const gone of [
+    "template",
+    "TEMPLATE_TEXT_MARK",
+    "TPL_ATTR",
+    "TPL_MEDIA_MARK",
+    "TPL_SCRIPT_MARK",
+    "data-x",
+  ]) {
+    assert.equal(snap.includes(gone), false, gone);
+  }
+});
+
+test("剥离: HTML 注释不出现在快照里（含渲染标记形态）", () => {
+  const { hd, doc } = makeEnv("");
+  const el = doc.createElement("div");
+  el.innerHTML = "Alpha <!--COMMENT_MARK--> beta <!--?lit$29506216$--> gamma";
+  const snap = hd.snapshotHtml(el);
+  assert.equal(snap.includes("COMMENT_MARK"), false);
+  assert.equal(snap.includes("lit$"), false);
+  assert.equal(snap.includes("<!--"), false);
+  assert.equal(snap, "Alpha  beta  gamma", "注释删净，正文与语序不变");
+});
+
+test("判空: 剥离后只剩空白的各形态快照为空串且不产生条目", () => {
+  const { hd, doc } = makeEnv(BLANK_HOST_FORMS.join(""));
+  assert.equal(hd.discoverEntries(doc.body).length, 0, "空白形态一律不产生条目");
+  for (const host of doc.body.children) {
+    assert.equal(hd.snapshotHtml(host), "", `${host.outerHTML} 快照应为空串`);
+  }
+});
+
+test("判空: 空宿主不写「已处理」登记——页面后来填充内容时下一轮重扫仍会评估它", () => {
+  // 资格判定通过（媒体备用文本计字）、快照却在媒体步骤清空后为空的块：
+  // 出口丢弃它，但不留下任何登记痕迹
+  const { hd, doc, hostState } = makeEnv(
+    `<div ${B}><svg viewBox="0 0 10 10"><text>chart label english</text></svg></div>`,
+  );
+  const host = doc.body.firstElementChild;
+  assert.equal(hd.discoverEntries(doc.body).length, 0, "判空宿主不产生条目");
+  assert.equal(hostState.size, 0, "空宿主不写「已处理」登记（不是「登记后跳过」）");
+
+  // 页面后来自行填充正文：同一块在下一轮重扫里被重新评估并成为宿主
+  host.innerHTML = "Late english content";
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 1, "填充内容后的重扫仍会评估它");
+  assert.equal(entries[0].el, host);
+  assert.equal(entries[0].html, "Late english content");
+});
+
+test("判空: 纯脚本容器（被样式撑出高度）不产生条目", () => {
+  const { hd, doc } = makeEnv(
+    `<div ${B}><script>var mark = "ONLY SCRIPT english words";</script></div>`,
+  );
+  const host = doc.body.firstElementChild;
+  assert.equal(hd.snapshotHtml(host), "", "剥离脚本后容器为空");
+  assert.equal(hd.discoverEntries(doc.body).length, 0, "纯脚本容器不成为宿主");
+});
+
+test("资格: 脚本里的中文不影响判定——短英文 + 长中文脚本仍成宿主", () => {
+  const scriptProse =
+    'var note = "这是一段很长的中文脚本文本，用来把汉字占比推高到三成以上，从而在修复前让整段被跳过";';
+  const { hd, doc } = makeEnv(`<p ${B}>Short english note<script>${scriptProse}</script></p>`);
+  const p = doc.body.firstElementChild;
+  assert.equal(hd.qualifiesAsHost(p), true, "脚本文本不计入汉字占比");
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 1, "短英文段落仍成宿主");
+  assert.equal(entries[0].el, p);
+  assert.equal(entries[0].html, "Short english note", "请求内容只剩正文");
+});
+
+test("回归: 含脚本的常规段落仍成宿主，快照只剩正文且语序不变", () => {
+  const { hd, doc } = makeEnv(
+    `<p ${B}>Alpha english text<script>var x = "SCRIPT_MARK";</script> beta english text</p>`,
+  );
+  const entries = hd.discoverEntries(doc.body);
+  assert.equal(entries.length, 1, "含脚本的常规段落照常成宿主");
+  assert.equal(entries[0].html, "Alpha english text beta english text", "脚本删净、正文语序不变");
+});
+
+test("剥离: 嵌套深度不限——逐层加深的包裹里，最内层的脚本/框架/模板/注释都被剥离", () => {
+  const { hd, doc } = makeEnv("");
+  const inner =
+    '<script>var deep = "DEEP_SCRIPT_MARK";</script>' +
+    "<noscript><span>DEEP_NOSCRIPT_MARK</span></noscript>" +
+    "<template><span>DEEP_TEMPLATE_MARK</span></template>" +
+    "<!--DEEP_COMMENT_MARK-->" +
+    "<b>kept english prose</b>";
+  const host = doc.createElement("div");
+  host.setAttribute("style", "display:block");
+  doc.body.appendChild(host);
+
+  // 层数只是构造手段，不是规格内容：循环逐层加深地构造，每一层都断言。
+  // 断言写在「全部条目的快照串起来」上，不假定只有一个条目。
+  let wrapped = inner;
+  for (let depth = 1; depth <= 14; depth++) {
+    wrapped = `<span>${wrapped}</span>`;
+    host.innerHTML = wrapped;
+    const all = hd
+      .discoverEntries(doc.body)
+      .map((e) => e.html)
+      .join("");
+    for (const gone of [
+      "DEEP_SCRIPT_MARK",
+      "DEEP_NOSCRIPT_MARK",
+      "DEEP_TEMPLATE_MARK",
+      "DEEP_COMMENT_MARK",
+      "<script",
+      "<noscript",
+      "<template",
+      "<!--",
+    ]) {
+      assert.equal(all.includes(gone), false, `深度 ${depth} 仍应剥离：${gone}`);
+    }
+    assert.ok(all.includes("kept english prose"), `深度 ${depth}：正文保留`);
+  }
+});
+
+test("判空: 嵌套深度不限的空壳判空——逐层加深的包裹里最内层只有空白，出口始终无条目", () => {
+  const { hd, doc } = makeEnv("");
+  const host = doc.createElement("div");
+  host.setAttribute("style", "display:block");
+  doc.body.appendChild(host);
+
+  let wrapped = "   ";
+  for (let depth = 1; depth <= 14; depth++) {
+    wrapped = `<span>${wrapped}</span>`;
+    host.innerHTML = wrapped;
+    assert.equal(hd.discoverEntries(doc.body).length, 0, `深度 ${depth}：整条空壳链算空`);
+  }
+});
+
+test("判空: 任意深度下，剥离/占位后内容为空的宿主都被出口丢弃", () => {
+  const { hd, doc } = makeEnv("");
+  const host = doc.createElement("div");
+  host.setAttribute("style", "display:block");
+  doc.body.appendChild(host);
+
+  // 媒体备用文本使资格判定通过，快照却在媒体步骤清空后为空——判空兜住资格判定
+  // 覆盖不到的偏差，且这份兜底在任意深度都成立
+  const svgOnly = '<svg viewBox="0 0 10 10"><text>chart label english</text></svg>';
+  let wrapped = svgOnly;
+  for (let depth = 1; depth <= 14; depth++) {
+    wrapped = `<span>${wrapped}</span>`;
+    host.innerHTML = wrapped;
+    assert.equal(hd.qualifiesAsHost(host), true, `深度 ${depth}：资格判定通过（判空是唯一兜底）`);
+    assert.equal(hd.snapshotHtml(host), "", `深度 ${depth}：媒体子树清空后只剩空白 → 快照空串`);
+    assert.equal(hd.discoverEntries(doc.body).length, 0, `深度 ${depth}：出口丢弃快照为空的候选`);
+  }
+});
+
+test("零写入: 剥离与判空只作用于克隆子树，页面真实 DOM 逐字节不变", () => {
+  const { hd, doc } = makeEnv(
+    `<div ${B}>Alpha<script>var s = "SCRIPT_MARK";</script><!--COMMENT_MARK--><template><span>T</span></template> beta</div>`,
+  );
+  const host = doc.body.firstElementChild;
+  const before = host.innerHTML;
+  hd.discoverEntries(doc.body);
+  hd.snapshotHtml(host);
+  assert.equal(host.innerHTML, before, "页面真实 DOM 零写入");
+  assert.ok(
+    before.includes("SCRIPT_MARK") && before.includes("<!--COMMENT_MARK-->"),
+    "原文含脚本与注释",
+  );
 });

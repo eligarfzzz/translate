@@ -83,6 +83,14 @@ function createContentSession(env) {
         DBG.debug("rescan:", entries.length, "new hosts");
       }
       await translator.translateEntries(entries, limit, reuse);
+      // 短文本缓存清理触发（ADR-0008 D7）：首轮全部宿主落定后向 background 发一条
+      // cleanup-cache——每会话恰好一次（runRound(true) 经 session.open() 守卫，
+      // 每会话仅此一趟；重扫 initial=false 不发）。会话仍活跃（还原后迟到的收尾
+      // 不发）且当次配置缓存开启才发。fire-and-forget：发送失败静默，清理无页面
+      // 可见面（D10）。
+      if (initial && cfg.cacheEnabled && session.isActive()) {
+        ext.runtime.sendMessage({ type: "cleanup-cache" }).catch(() => {});
+      }
     } finally {
       session.endTranslating();
     }

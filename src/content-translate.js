@@ -77,7 +77,10 @@ function createTranslator({ ext, session, renderer, DBG, onSettled }) {
                 renderer.renderFinal(div, body, gen);
                 // 成功段落进链：纯数据对（本段原文、原始回显）——包装由 background 组装
                 // 链中消息时经 prompt.js 的 helper 补上。失败 / 中断 / 空回显不进链。
-                if (chain) chain.push({ html: entry.html, echo: raw });
+                // 缓存命中段（done.cached === true，ADR-0008 D5）同样不进链：模型永不
+                // 读到非本轮产生的译文；槽位前几段全命中时，链从第一个未命中段开始累积。
+                // 命中段的预览 / 定稿 / 落定计数与 miss 段逐字节一致，差的只有这一步。
+                if (chain && msg.cached !== true) chain.push({ html: entry.html, echo: raw });
               } else {
                 errored = true; // 空回显「未返回译文」：失败路径（净化空的静默移除不算）
                 renderer.markError(div, "未返回译文", gen);

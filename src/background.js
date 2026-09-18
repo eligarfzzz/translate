@@ -1,10 +1,26 @@
 // background service worker：右键菜单 / 左键打开配置页 / API 代理（见 docs/adr/0004）。
 
 import { getChannel } from "./debug.js";
-import { DEFAULT_PROMPT_TEMPLATE, renderPrompt, wrapHost, isHostWrapped } from "./prompt.js";
+import {
+  DEFAULT_PROMPT_TEMPLATE,
+  renderPrompt,
+  wrapHost,
+  isHostWrapped,
+  stripHostWrapper,
+} from "./prompt.js";
 import { loadConfig } from "./config.js";
+import { createCacheStore, cacheFingerprint, fitsCacheBytes } from "./cache-store.js";
 
 const DBG = getChannel("bg", chrome.storage);
+
+// 短文本缓存（ADR-0008）：service worker 生命周期一个存储实例；indexedDB 全局现取
+// （node 测试由沙箱在 import 前注入替身）。一切 IDB 故障在 cache-store 模块内消化为
+// 「未命中 / 跳过」并经此日志回调落痕——D10 的降级只收口在 cache-store（票 02 裁决），
+// 本文件不再设第二条 try/catch 路径。错误对象先 String 化再走日志，保住消息本体。
+const cache = createCacheStore({
+  indexedDB: globalThis.indexedDB,
+  log: (...args) => DBG.error(...args.map(String)),
+});
 
 const MENU_ID = "translate-page";
 
@@ -66,7 +82,8 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 //   content → background: start { text, history? }——history 为会话链（纯数据对
 //     [{ html, echo }]：html = 该段原文骨架，echo = 模型原始回显），链序最老在前；
 //     仅会话重用且链非空时携带，缺省即链首形态（每宿主一次独立请求）。
-//   background → content: delta（增量文本）/ done（定稿）/ error（失败）/
+//   background → content: delta（增量文本）/ done（定稿，缓存命中回放时带可选标志
+//     cached: true，ADR-0008）/ error（失败）/
 //     restart（本轮尝试作废、重开一轮——重试前发出，让 content 清空累积回显）。
 
 const inflight = new Map(); // port -> AbortController
@@ -137,6 +154,7 @@ function chainMessages(history, hostHtml) {
 // 两种触发器各重试一次，都以链首形态（无历史）重试；再败走既有错误通道。
 // 重试前先发 restart 统一恢复：失败尝试已流式送出的预览无法撤回，restart 让 content
 // 清空累积回显，定稿与入链回显因此只含重试那次（超限路径下 content 尚无回显，同一条路径）。
+// 返回获胜尝试的累积全文（空回显为 ""），供缓存写入判定（D4）；失败路径照旧抛错。
 async function requestWithRetry({ cfg, messages, head, allowLimitRetry, onDelta, signal, port }) {
   let limitRetries = allowLimitRetry ? 1 : 0;
   let shapeRetries = 1;
@@ -166,7 +184,7 @@ async function requestWithRetry({ cfg, messages, head, allowLimitRetry, onDelta,
       attempt = head;
       continue;
     }
-    if (full.trim() === "" || isHostWrapped(full)) return;
+    if (full.trim() === "" || isHostWrapped(full)) return full;
     if (shapeRetries === 0) throw new Error("回显不合 <html> 包装（重试后仍不合）");
     shapeRetries--;
     attemptNo++;
@@ -175,6 +193,37 @@ async function requestWithRetry({ cfg, messages, head, allowLimitRetry, onDelta,
     attempt = head;
   }
 }
+
+// 可入缓存的回显（D4）：恰一层 <html> 包装且剥壳后非空——"" / 纯空白 / <html></html>
+// 一律不写。判定与剥壳同源 prompt.js，与 content 的「未返回译文」口径一致。
+function cacheableEcho(full) {
+  return isHostWrapped(full) && stripHostWrapper(full) !== "";
+}
+
+// 缓存消息监听器（同一主题的消息聚在一处，spec D4）：
+//   clear-cache（手动清空，票 01）：整库清空并异步回应 { ok, removed }——该分支保持回应
+//     通道打开（return true）。清空与 cacheEnabled 无关（D6）：不加载配置，开关关着照清。
+//     失败留痕由 store 经注入的日志回调（本文件的 DBG.error 通道）完成，本分支不重复记
+//     第二条，也不另设 try/catch——store 的 clear() 本身不抛（D10 收口）。
+//   cleanup-cache（自动清理触发，D7）：content 在每会话首轮落定后发来；缓存开才以当前配置
+//     执行一次清理（删过期 + 淘超限），缓存关一律不清。清理失败只记日志——它没有也不该有
+//     页面可见面。fire-and-forget：不读回应通道。
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "clear-cache") {
+    cache.clear().then((result) => sendResponse({ ok: result.ok, removed: result.removed }));
+    return true; // 异步回应：保持回应通道打开
+  }
+  if (msg?.type !== "cleanup-cache") return;
+  (async () => {
+    const cfg = await loadConfig(chrome.storage);
+    if (!cfg.cacheEnabled) return;
+    await cache.cleanup({
+      now: Date.now(),
+      ttlDays: cfg.cacheTtlDays,
+      maxEntries: cfg.cacheMaxEntries,
+    });
+  })().catch((e) => DBG.error("cache cleanup failed:", String(e?.message || e)));
+});
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "translate-host") return;
@@ -217,9 +266,26 @@ chrome.runtime.onConnect.addListener((port) => {
         concurrency: cfg.concurrency,
         targetLang: cfg.targetLang,
       });
+
+      // 短文本缓存查询（D2/D3）：未配置守卫之后、fetch 之前；开关开且骨架字节过门才查，
+      // 指纹按当次 loadConfig 结果现算。命中 = 回放一条缓存回显全文 delta +
+      // done{cached:true}，不发上游请求——content 的预览/定稿/落定/计数零改动，
+      // 看到一次普通的快速应答。lastUsedAt 的命中刷新在 store 内部同事务完成。
+      const cacheable = cfg.cacheEnabled && fitsCacheBytes(hostHtml, cfg.cacheMaxBytes);
+      const fingerprint = cacheable ? cacheFingerprint(cfg) : null;
+      if (cacheable) {
+        const hit = await cache.get(fingerprint, hostHtml, Date.now());
+        if (hit) {
+          DBG.debug("cache hit:", hostHtml);
+          safePost(port, { type: "delta", text: hit.echo });
+          safePost(port, { type: "done", cached: true });
+          return;
+        }
+      }
+
       // 链首形态同时是重试形态（弃历史、以链首重开一局）
       const head = headMessages(cfg, hostHtml);
-      await requestWithRetry({
+      const full = await requestWithRetry({
         cfg,
         messages: history.length ? chainMessages(history, hostHtml) : head,
         head,
@@ -228,6 +294,11 @@ chrome.runtime.onConnect.addListener((port) => {
         signal: ac.signal,
         port,
       });
+      // 成功收尾才写缓存（D4）：恰一层包装且剥壳后非空的回显（含重试获胜）才落库；
+      // 错误/中止走下面的 catch，空回显（"" / <html></html>）被 cacheableEcho 挡下——都不写。
+      if (cacheable && cacheableEcho(full)) {
+        await cache.put(fingerprint, hostHtml, full, Date.now());
+      }
       DBG.debug("host request done");
       safePost(port, { type: "done" });
     } catch (err) {

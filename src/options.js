@@ -12,7 +12,10 @@ import {
 const GROUPS = {
   api: { label: "API", fields: ["apiBase", "apiKey", "model", "concurrency", "reuseSession"] },
   prompt: { label: "提示词", fields: ["promptTemplate", "extra"] },
-  general: { label: "通用", fields: ["targetLang"] },
+  general: {
+    label: "通用",
+    fields: ["targetLang", "cacheEnabled", "cacheMaxEntries", "cacheTtlDays", "cacheMaxBytes"],
+  },
 };
 const FIELDS = Object.values(GROUPS).flatMap((g) => g.fields);
 const form = document.getElementById("form");
@@ -28,16 +31,19 @@ function flash(msg) {
 
 // 表单控件 ↔ 配置值（唯一一处）：文本/数字控件走 value（恒为字符串），复选框走 checked（布尔）。
 // 回填、保存、按组清空三处都经这两个函数，控件类型的知识不散落。写入 undefined 即「未设置」
-// ——空框 / 未勾选，正是「空即未设置」在 DOM 上的形态；判空本身仍在配置模块。
+// ——空框 / 复选框的默认勾选态（默认关 → 未勾选，默认开 → 勾选），正是「空即未设置」在 DOM
+// 上的形态；判空本身仍在配置模块。
 const readValue = (el) => (el.type === "checkbox" ? el.checked : el.value);
 const writeValue = (el, value) => {
-  if (el.type === "checkbox") el.checked = value === true;
+  // 复选框的「未设置」是默认态：值缺省时回默认值表的勾选面（默认开字段清空后仍勾选，
+  // 保存才删键回退默认，而不是把默认面写成非默认面落盘）
+  if (el.type === "checkbox") el.checked = value ?? TRANSLATE_CONFIG[el.name] === true;
   else el.value = value ?? "";
 };
 
 // 空框占位：占位文字（默认值本身 / 空串默认值字段的示例）由配置模块给出，运行时注入、
 // 不写进 HTML；一视同仁——不区分该字段是否已设置，有值时占位本就不显示。
-// 复选框没有空框，不收占位（布尔字段的占位文字是 String(false)，写进 DOM 只是废属性）。
+// 复选框没有空框，不收占位（布尔字段的占位文字是 String(默认值)，写进 DOM 只是废属性）。
 function fillPlaceholders() {
   for (const f of FIELDS) {
     const el = form.elements[f];
@@ -94,7 +100,7 @@ for (const btn of document.querySelectorAll("[data-restore]")) {
     const group = GROUPS[name];
     if (!group) return;
     for (const f of group.fields) {
-      // 清空 = 写回「未设置」：文本/数字控件回空框，复选框回未勾选
+      // 清空 = 写回「未设置」：文本/数字控件回空框，复选框回默认勾选态
       if (form.elements[f]) writeValue(form.elements[f], undefined);
     }
     DBG.debug("group cleared (not saved):", name);
@@ -145,6 +151,21 @@ document.getElementById("clear-logs").addEventListener("click", async () => {
   await chrome.storage.local.remove(["log-cs", "log-bg", "log-opt"]);
   DBG.debug("logs cleared");
   flash("日志已清空");
+});
+
+// 「清空缓存」：一次性动作，不是设置项——不参与保存（按钮无 name）、不读配置（开关关着
+// 照清，spec D6）、点击不触发任何 chrome.storage 写入（sync / local 一字不碰，D10），
+// 所以这里不能走 DBG（DBG 会落盘 log-opt）。回应 ok 为真 → 成功文案含条数（0 条不另立
+// 分支）；ok 为假或发送 / 回应抛错 → 失败文案（不含技术细节，故障细节由 background 侧
+// 记日志，D7：用户显式要求的动作必须回报成败，静默或假报成功是缺陷）
+document.getElementById("clear-cache").addEventListener("click", async () => {
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: "clear-cache" });
+  } catch {
+    res = null; // 发送 / 回应本身抛错（如 SW 不在）：与回应失败态同一失败文案
+  }
+  flash(res?.ok ? `缓存已清空（${res.removed} 条）` : "缓存清空失败，请重试");
 });
 
 fillPlaceholders();

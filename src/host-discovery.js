@@ -5,6 +5,7 @@ import * as TextUtils from "./text-utils.js";
 
 // TreeWalker 常量的数值形式（避免对全局 NodeFilter 的环境依赖）
 const SHOW_TEXT = 4;
+const SHOW_COMMENT = 128;
 const FILTER_ACCEPT = 1;
 const FILTER_REJECT = 2;
 
@@ -64,6 +65,15 @@ const COMMON_BLOCK_QUERY =
 // 仅作用于投喂序列化的克隆子树；可翻性判定与回显净化不受此清单影响。
 const MEDIA_PLACEHOLDER_SELECTOR = "img, svg, picture, source, video, audio, canvas, map";
 
+// 非渲染标签清单：不渲染可见内容的标签（与媒体占位清单、控件换名清单并列的唯一一处定义）。
+// 快照时删除元素及其整棵子树——删 <template> 即连带它的 content 一并消失，不必单独遍历；
+// 资格判定收集宿主文本时的排除范围与快照删除同源（不得各写一份），
+// 脚本里的中文因此不再进入汉字占比计算。
+const NON_RENDERED_SELECTOR = "script, style, iframe, template, noscript, link, meta, base";
+
+// 资格判定收集文本时的排除范围：pre/code 子树 + 非渲染标签清单（同源拼成一条选择器）
+const TEXT_EXCLUDED_SELECTOR = "pre, code, " + NON_RENDERED_SELECTOR;
+
 // 表单控件换名清单：快照时 input/button 换为 span——
 // 回显不再产生可交互元素；input 为纯占位（空 span，value/placeholder 一律不投喂）、
 // button 子内容保留。
@@ -91,16 +101,16 @@ function createHostDiscovery(env) {
     return rect.width > 0 && rect.height > 0;
   }
 
-  // 剥码文本：host 内除去 pre/code 子树后的自然语言候选。
-  // 这是"整段落都是代码 → 直接跳过"规则的基石。
+  // 剥码/剥非渲染文本：host 内除去 pre/code 子树与非渲染标签子树后的自然语言候选。
+  // 这是"整段落都是代码 → 直接跳过"规则的基石；排除范围与快照删除同源
+  // （TEXT_EXCLUDED_SELECTOR 由 NON_RENDERED_SELECTOR 拼成）。
   function nonCodeText(host) {
     let out = "";
     const walker = doc.createTreeWalker(host, SHOW_TEXT, {
       acceptNode: function (node) {
         let el = node.parentElement;
         while (el && el !== host) {
-          const tag = el.tagName;
-          if (tag === "PRE" || tag === "CODE") return FILTER_REJECT;
+          if (el.matches(TEXT_EXCLUDED_SELECTOR)) return FILTER_REJECT;
           el = el.parentElement;
         }
         return FILTER_ACCEPT;
@@ -127,15 +137,24 @@ function createHostDiscovery(env) {
   }
 
   // 快照（骨架序列化，管线顺序固定）：克隆宿主 → 剔除本扩展插入物 →
-  // 媒体标签占位化（去属性去子树，图形数据不进 prompt）→
-  // input/button 换名 span（input 的 value 转文本、button 子内容保留）→
-  // 剥离全部元素属性——投喂只剩标签名与文本，模型无从篡改 class/href
+  // 剥离非渲染标签及其整棵子树 + 删除 HTML 注释 → 媒体标签占位化（去属性去子树，
+  // 图形数据不进 prompt）→ input/button 换名 span（input 的 value 转文本、button 子内容保留）→
+  // 剥离全部元素属性 → 剥离后取文本内容判空（只剩空白则返回空串，
+  // 宿主发现出口据此丢弃该候选）——投喂只剩标签名与文本，模型无从篡改 class/href
   function snapshotHtml(hostEl) {
     const clone = hostEl.cloneNode(true);
-    // 就地删除/替换元素的三个循环：先物化成数组，避免遍历中改动集合
+    // 就地删除/替换元素的循环：先物化成数组，避免遍历中改动集合
     for (const inserted of Array.from(clone.querySelectorAll(".translate-node"))) {
       inserted.remove();
     }
+    for (const el of Array.from(clone.querySelectorAll(NON_RENDERED_SELECTOR))) {
+      el.remove();
+    }
+    // 注释不渲染、输出侧净化只删元素删不掉它，故在输入侧删（注释节点需单独遍历收集）
+    const commentWalker = doc.createTreeWalker(clone, SHOW_COMMENT);
+    const comments = [];
+    while (commentWalker.nextNode()) comments.push(commentWalker.currentNode);
+    for (const comment of comments) comment.remove();
     for (const el of Array.from(clone.querySelectorAll(MEDIA_PLACEHOLDER_SELECTOR))) {
       while (el.firstChild) el.removeChild(el.firstChild);
       stripAllAttributes(el);
@@ -148,6 +167,9 @@ function createHostDiscovery(env) {
       ctrl.parentNode.replaceChild(span, ctrl);
     }
     for (const el of clone.querySelectorAll("*")) stripAllAttributes(el);
+    // 剥离后判空：取的是实际要发送的内容（含媒体占位、控件换名、属性剥离后的结果），
+    // 与资格判定的覆盖范围不同——判空兜住资格判定覆盖不到的偏差（如被媒体步骤清空子树的块）
+    if (TextUtils.isWhitespaceOnly(clone.textContent)) return "";
     return clone.innerHTML;
   }
 
@@ -183,8 +205,12 @@ function createHostDiscovery(env) {
     for (const child of start.children) visit(child); // root/body 自身不作宿主
     // 按档位稳定排序：正文先占满并发池，边缘区域排到队尾；档内保持文档序
     // （ES2019 起 sort 稳定，无需额外记下标）。排序只改请求次序，不改译文位置。
+    // 剥离后快照为空的候选直接丢弃：不产生条目即不建译文节点、不占并发槽、
+    // 不计入进度徽标的分母与括号、不写"已处理"登记（页面后来自行填充内容时
+    // 下一轮重扫仍会评估它）。
     return hosts
       .map((el) => ({ el: el, html: snapshotHtml(el), tier: regionTier(el) }))
+      .filter((entry) => entry.html !== "")
       .sort((a, b) => a.tier - b.tier);
   }
 

@@ -27,6 +27,14 @@ const TRANSLATE_CONFIG = {
   promptTemplate: DEFAULT_PROMPT_TEMPLATE,
   // 追加提示词：插到模板里 {extra} 处的自定义规则（多行可用）；空即未设置，跟随版本默认（空）
   extra: "",
+  // 短文本缓存开关，默认开（命中即回放既有回显；关掉则每次都直连端点，见 ADR-0008）
+  cacheEnabled: true,
+  // 短文本缓存条目上限：超出后按最久未使用淘汰
+  cacheMaxEntries: 10000,
+  // 短文本缓存过期天数：以最后一次写入/命中起算，到期清除
+  cacheTtlDays: 30,
+  // 可缓存的原文阈值（UTF-8 字节，骨架 HTML 不含 <html> 包装）：更长的宿主不查询也不写入
+  cacheMaxBytes: 30,
 };
 
 // 永不接受存储覆盖的键
@@ -74,7 +82,8 @@ function isMissingHostPlaceholder(key, raw) {
 // （有效值永远不是 undefined）。读路径与写路径共用此函数，判断不可能漂移。
 //   字符串：字符串且 trim 后非空——null/undefined/数字/对象/数组/纯空白一律为空
 //   数字：number 或数字串，有限、大于 0 的整数——0/负数/小数/NaN/非有限/非数字串/空串为空
-//   布尔：仅字面量 true 有效——false 与其余类型（含字符串 "true"）一律为空，即删键
+//   布尔：只存非默认面——严格等于默认值反面的布尔才落盘（默认 false 存 true、默认 true
+//         存 false）；默认面与其余类型（含字符串 "true"/"false"）一律为空，即删键
 //   提示词模板：字符串规则之上还必须包含 {host}，缺占位符等同留空（规则本体见 lacksHostPlaceholder）
 function normalizeValue(key, defaultValue, raw) {
   if (typeof defaultValue === "number") {
@@ -82,9 +91,13 @@ function normalizeValue(key, defaultValue, raw) {
     const n = typeof raw === "number" ? raw : Number(raw.trim());
     return Number.isInteger(n) && n > 0 ? n : undefined;
   }
-  // 布尔字段（会话重用之类）：只有字面量 true 才落盘——未勾选即未设置，
-  // 回退默认 false；字符串 "true"、数字、null 等形态一律不认。
-  if (typeof defaultValue === "boolean") return raw === true ? true : undefined;
+  // 布尔字段：只存非默认面——默认 false（reuseSession）仅 true 落盘，默认 true
+  // （cacheEnabled）仅显式 false 落盘；默认面、字符串 "true"/"false"、数字、null 等
+  // 形态一律删键回退默认（镜像推广，见 ADR-0003 追加段）。
+  if (typeof defaultValue === "boolean") {
+    const nonDefault = !defaultValue;
+    return raw === nonDefault ? nonDefault : undefined;
+  }
   if (typeof defaultValue !== "string") return undefined;
   if (typeof raw !== "string") return undefined;
   const s = raw.trim();

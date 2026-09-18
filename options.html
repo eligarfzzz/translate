@@ -146,9 +146,29 @@
         hidden
       >
         <label>目标语言<input name="targetLang" type="text" /></label>
+        <label><input name="cacheEnabled" type="checkbox" />短文本缓存</label>
+        <label
+          >缓存条目上限（超出后淘汰最久未使用）<input
+            name="cacheMaxEntries"
+            type="number"
+            min="1"
+            step="1"
+        /></label>
+        <label
+          >缓存过期天数（未使用即过期）<input name="cacheTtlDays" type="number" min="1" step="1"
+        /></label>
+        <label
+          >短文本阈值（UTF-8 字节，超过不缓存）<input
+            name="cacheMaxBytes"
+            type="number"
+            min="1"
+            step="1"
+        /></label>
         <button type="button" data-restore="general">恢复默认</button>
         <button type="button" id="export-logs">导出日志</button>
         <button type="button" id="clear-logs">清空日志</button>
+        <!-- 一次性动作按钮，与「保存」无关：绝不能带 name（两个反向守门要求表单 name ⊆ 默认值表键） -->
+        <button type="button" id="clear-cache">清空缓存</button>
         <p class="hint">
           运行日志本地落盘（chrome.storage.local，每通道最近 500
           条，密钥自动脱敏）：翻译流程日志在网页控制台（勾选 Verbose），API 请求日志在扩展的 Service

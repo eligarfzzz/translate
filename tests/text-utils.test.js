@@ -1,8 +1,15 @@
 // 工单 04：text-utils 测试——中文占比 0.3 边界、URL 剔除、字母资格、实体剥标
+// 票 01（feed-strip-non-rendering）：空白判定纯函数（与输出侧净化同口径）
 import { test } from "node:test";
 import assert from "node:assert";
 
-import { isChinese, textOf, hasTranslatableText, stripUrlTokens } from "../src/text-utils.js";
+import {
+  isChinese,
+  textOf,
+  hasTranslatableText,
+  stripUrlTokens,
+  isWhitespaceOnly,
+} from "../src/text-utils.js";
 
 // ---- isChinese：汉字占比 > 0.3 视为中文 ----
 
@@ -74,4 +81,36 @@ test("hasTranslatableText: 空串 → false", () => {
 
 test("stripUrlTokens: 剔除 http(s) 与 www. 形态（不合并内部空格）", () => {
   assert.equal(stripUrlTokens("see https://a.com and www.b.com now"), "see  and  now");
+});
+
+// ---- isWhitespaceOnly：整串只由空白（含零宽字符）构成 ----
+// 口径与输出侧净化同源：\s 加零宽 U+200B-U+200D
+
+test("isWhitespaceOnly: 各类空白与零宽字符 → true", () => {
+  const blanks = [
+    "",
+    " ",
+    "\t",
+    "\n",
+    "\r\n",
+    " \t\n ",
+    "\u00A0", // &nbsp; 解码后
+    "\u2002", // &ensp; 解码后
+    "\u2000\u200A",
+    "\u202F",
+    "\u3000",
+    "\uFEFF",
+    "\u200B",
+    "\u200C",
+    "\u200D",
+    "\u200B\u200C\u200D \u00A0",
+  ];
+  for (const blank of blanks) assert.equal(isWhitespaceOnly(blank), true, JSON.stringify(blank));
+});
+
+test("isWhitespaceOnly: 含任一实质字符 → false", () => {
+  const substantial = ["a", " a ", "中", "1", ".", "-", "a\u00A0b", "\u200Bx", "\u200B中"];
+  for (const text of substantial) {
+    assert.equal(isWhitespaceOnly(text), false, JSON.stringify(text));
+  }
 });
