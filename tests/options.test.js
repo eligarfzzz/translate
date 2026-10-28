@@ -1048,6 +1048,42 @@ test("缓存表格: 点击已选中的「通用」TAB 不重新读取、不改�
   assert.equal(env.cacheRows()[0][0], "<b>orig-24</b>", "表格仍是第 2 页内容");
 });
 
+test("缓存表格: 读取失败后点击已选中的「通用」TAB 重新读取第 1 页并恢复", async (t) => {
+  // 失败态下点击已选中的 TAB 不是空操作：那是用户唯一的显式重试动作（cache-inspection D6）
+  let failing = true;
+  const env = await createOptionsSandbox({
+    listCacheResult: () =>
+      failing ? { ok: false } : emptyList({ total: 1, entries: [cacheEntry(1)] }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+  assert.equal(env.cacheStatus.textContent, "缓存读取失败，请重试", "前置：首次读取失败");
+  assert.equal(env.prevPage.disabled, true, "前置：失败态禁用翻页");
+
+  failing = false; // 存储恢复
+  await env.selectTab("general"); // 再点一次当前已选中的 TAB
+
+  assert.deepEqual(
+    env.sentMessages,
+    [
+      { type: "list-cache", page: 1, pageSize: 20 },
+      { type: "list-cache", page: 1, pageSize: 20 },
+    ],
+    "失败后再点已选中的 TAB 重新发出第 1 页请求",
+  );
+  assert.equal(env.cacheStatus.textContent, "", "恢复：失败提示消失");
+  assert.equal(env.cacheRows()[0][0], "<b>orig-1</b>", "表格显示重试读到的内容");
+  assert.equal(env.prevPage.disabled, true, "重试成功后按新结果重绘翻页态");
+
+  await env.selectTab("general"); // 恢复之后再点一次：重试路径收回，重新回到空操作
+  assert.equal(
+    env.sentMessages.filter((m) => m.type === "list-cache").length,
+    2,
+    "读取成功后已选中的 TAB 又是不重读的空操作",
+  );
+});
+
 test("缓存表格: 离开再进入「通用」TAB 重新读取第 1 页", async (t) => {
   const env = await createOptionsSandbox({
     listCacheResult: emptyList({ total: 1, entries: [cacheEntry(1)] }),

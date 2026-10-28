@@ -14,7 +14,7 @@ const encoder = new TextEncoder(); // UTF-8 字节计量（指纹散列与字节
 // 指纹输入的五项请求塑造值以记录分隔符拼接——防 ["ab","c"] 与 ["a","bc"] 的拼接歧义
 const FIELD_SEPARATOR = "\x1e";
 
-// 配置指纹（D1）：apiBase / model / targetLang / promptTemplate / extra 五项拼接后的
+// 配置指纹（短文本缓存 D1）：apiBase / model / targetLang / promptTemplate / extra 五项拼接后的
 // FNV-1a（32 位）散列，定长十六进制输出。apiKey 不进指纹——密钥不塑造译文；
 // 散列不可逆，缓存键不泄露可读配置（短文本缓存 D12 零痕迹姿势不受影响）。任一值变化指纹即变，
 // 旧条目自然过期，无需显式失效。
@@ -30,7 +30,7 @@ function cacheFingerprint({ apiBase, model, targetLang, promptTemplate, extra })
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-// 字节门（D2）：骨架原文的 UTF-8 字节数 ≤ 阈值才可查可写；更长的宿主永远直走上游
+// 字节门（短文本缓存 D2）：骨架原文的 UTF-8 字节数 ≤ 阈值才可查可写；更长的宿主永远直走上游
 function fitsCacheBytes(original, maxBytes) {
   return encoder.encode(String(original)).length <= maxBytes;
 }
@@ -40,11 +40,14 @@ const DB_VERSION = 1;
 const STORE_NAME = "entries";
 const INDEX_NAME = "lastUsedAt";
 
-// 键形（D1）：指纹（定长十六进制）+ 单元分隔符 + 骨架原文。指纹定长，原文任意字符
+// 列表查询的每页条数上界：限在存储边界而不是调用方——异常调用最多取走 100 条
+const PAGE_SIZE_MAX = 100;
+
+// 键形（短文本缓存 D1）：指纹（定长十六进制）+ 单元分隔符 + 骨架原文。指纹定长，原文任意字符
 // 都不产生歧义；分隔符只是可读性间隔
 const KEY_SEPARATOR = "\x1f";
 
-// 原文还原（D7）：键 = 指纹 + 分隔符 + 原文，指纹只含十六进制字符（定长输出）、
+// 原文还原（cache-inspection D7）：键 = 指纹 + 分隔符 + 原文，指纹只含十六进制字符（定长输出）、
 // 不会命中分隔符——首个分隔符之后即原文，值里因此不必再存一份原文
 function keyOf(fingerprint, original) {
   return fingerprint + KEY_SEPARATOR + original;
@@ -89,9 +92,6 @@ function scanByIndex(store, onEntry) {
     };
   });
 }
-
-// 列表查询的每页条数上界：限在存储边界而不是调用方——异常调用最多取走 100 条
-const PAGE_SIZE_MAX = 100;
 
 // 缓存存储工厂：indexedDB 为浏览器全局 indexedDB 同形的工厂句柄（缺省则一切操作降级），
 // log 为日志回调（缺省静默）。
@@ -163,7 +163,7 @@ function createCacheStore({ indexedDB: idb, log = () => {} } = {}) {
     }
   }
 
-  // 清理（D6）：先删 lastUsedAt 早于过期界的全部条目，再统计条数，超出上限时按
+  // 清理（短文本缓存 D6）：先删 lastUsedAt 早于过期界的全部条目，再统计条数，超出上限时按
   // lastUsedAt 从最旧淘汰到恰好上限。now、天数、上限由调用方传入；三段各一个事务
   // 顺序执行（事务在事件落幕后自动提交，无法跨 await 复用）。IDB 故障记日志后
   // 静默跳过（短文本缓存 D10）——本轮不清，下轮清理再试。
@@ -207,7 +207,8 @@ function createCacheStore({ indexedDB: idb, log = () => {} } = {}) {
   // 之间可能被并发写入把数字搞歪）。空库视为成功：{ ok: true, removed: 0 }。
   // 与 cleanup 是两条独立路径：cleanup 按配置删过期 + 淘超限，clear 按用户意图清空一切；
   // 两者共用同一份 schema 常量，不共用逻辑。IDB 故障记日志后返回 { ok: false, removed: 0 }，
-  // 不抛（短文本缓存 D10 收口，与其它方法同形）；清空不是屏障——在途请求成功后仍会写回条目（D8）。
+  // 不抛（短文本缓存 D10 收口，与其它方法同形）；清空不是屏障——在途请求成功后仍会写回条目
+  // （cache-manual-clear D8）。
   async function clear() {
     try {
       const db = await open();
@@ -224,14 +225,15 @@ function createCacheStore({ indexedDB: idb, log = () => {} } = {}) {
   }
 
   // 整库分页列表（cache-inspection D7/D8）：复用 lastUsedAt 索引的反向游标——最新用在前；
-  // 原文从游标主键还原（值里不重复保存原文），总条数由 store.count() 给出。页码边界（D5）：
-  // 请求页码归一为 [1, 总页数]，空库归一为第 1 页的空结果；归一后的页码随内容一起
-  // 返回，调用方不必自己算。每页条数在存储边界限在 1–100：异常调用不能一次取走
-  // 整库，超界按 100，回应里的 pageSize 是实际生效值。返回 { ok: true, page, pageSize,
-  // total, entries }，entries = [{ original, echo, hitCount, lastUsedAt }]（次数随条目
-  // 带给设置页，D8；旧记录缺 hitCount 按零显示，D11）。与翻译路径的降级口径不同：
-  // 用户主动查看时的 IDB 故障记日志并返回 { ok: false }（D9）——设置页据此显示失败
-  // 提示，不得伪装成空库；故障不抛给调用方（与其余方法同形）。
+  // 原文从游标主键还原（值里不重复保存原文），总条数由 store.count() 给出。页码边界
+  // （cache-inspection D5）：请求页码归一为 [1, 总页数]，空库归一为第 1 页的空结果；归一后的
+  // 页码随内容一起返回，调用方不必自己算。每页条数在存储边界限在 1–100（PAGE_SIZE_MAX）：
+  // 异常调用不能一次取走整库，超界按 100，回应里的 pageSize 是实际生效值。返回
+  // { ok: true, page, pageSize, total, entries }，entries = [{ original, echo, hitCount,
+  // lastUsedAt }]（次数随条目带给设置页，cache-inspection D8；旧记录缺 hitCount 按零显示，
+  // cache-inspection D11）。与翻译路径的降级口径不同：用户主动查看时的 IDB 故障记日志并
+  // 返回 { ok: false }（cache-inspection D9）——设置页据此显示失败提示，不得伪装成空库；
+  // 故障不抛给调用方（与其余方法同形）。
   async function list({ page, pageSize }) {
     try {
       const db = await open();

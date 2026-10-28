@@ -110,17 +110,23 @@ for (const btn of document.querySelectorAll("[data-restore]")) {
 
 // TAB 切换：hidden 切面板、aria-selected 切标签态，左右方向键在标签间移动焦点
 const tabs = [...document.querySelectorAll('[role="tab"]')];
+// 最近一次列表读取是否成功（由下方 loadCachePage 维护）：「通用」TAB 在读取失败后再点一次
+// 是重试，读取成功后再点一次才是空操作
+let lastCacheReadOk = true;
 function selectTab(tab) {
-  // 点击当前已选中的 TAB 是空操作：不重读、不动页码（离开再回来才是新一轮读取，见下）
-  if (tab.getAttribute("aria-selected") === "true") return;
+  const onGeneral = tab.getAttribute("aria-controls") === "panel-general";
+  // 点击当前已选中的 TAB 是空操作：不重读、不动页码（离开再回来才是新一轮读取，见下）。
+  // 唯一的例外是「通用」TAB 且最近一次读取失败——失败态下再点一次是用户唯一的显式重试
+  // 动作，放行到下面的读取第 1 页（cache-inspection D6）
+  if (tab.getAttribute("aria-selected") === "true" && !(onGeneral && !lastCacheReadOk)) return;
   for (const t of tabs) {
     const on = t === tab;
     t.setAttribute("aria-selected", String(on));
     t.tabIndex = on ? 0 : -1;
     document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
   }
-  // 进入「通用」TAB 就读第 1 页（D6）：不持续自动刷新，每次进入都是一次新读取
-  if (tab.getAttribute("aria-controls") === "panel-general") loadCachePage(1);
+  // 进入「通用」TAB 就读第 1 页（cache-inspection D6）：不持续自动刷新，每次进入都是一次新读取
+  if (onGeneral) loadCachePage(1);
 }
 tabs.forEach((tab, i) => {
   tab.addEventListener("click", () => selectTab(tab));
@@ -137,10 +143,10 @@ tabs.forEach((tab, i) => {
 // ---------------- 缓存内容表格（cache-inspection 票 01 / 02） ----------------
 // 只读视图：走独立的 list-cache 请求—响应消息（cache-inspection D8），页码与每页条数由本页提出，
 // background 回应归一后的页码与条目（骨架原文 / 回显 / 命中次数 / 最后使用时间）。表格不参与保存：
-// 所有文本经 textContent 注入，缓存里的标签不会成为本页元素（D3/D16）。命中次数是
-// 每条条目的累计使用信息，不是全局命中率（D14）——只多一列，不新增汇总区。
-// 读取失败显示失败提示，不伪装成空库（D9）。
-const CACHE_PAGE_SIZE = 20; // 每页固定二十条（D4，不可配）
+// 所有文本经 textContent 注入，缓存里的标签不会成为本页元素（cache-inspection D3/D16）。命中次数是
+// 每条条目的累计使用信息，不是全局命中率（cache-inspection D14）——只多一列，不新增汇总区。
+// 读取失败显示失败提示，不伪装成空库（cache-inspection D9）。
+const CACHE_PAGE_SIZE = 20; // 每页固定二十条（cache-inspection D4，不可配）
 const cacheRows = document.getElementById("cache-rows");
 const cacheStatus = document.getElementById("cache-status");
 const pageInfo = document.getElementById("cache-page-info");
@@ -152,7 +158,7 @@ function renderCacheRows(entries) {
   cacheRows.textContent = ""; // 重绘前清空旧行（不用 innerHTML）
   for (const entry of entries) {
     const tr = document.createElement("tr");
-    // 次数与其它列同样走 textContent；缺字段的旧条目已由 store 按零归一（D11）
+    // 次数与其它列同样走 textContent；缺字段的旧条目已由 store 按零归一（cache-inspection D11）
     const cells = [
       entry.original,
       entry.echo,
@@ -191,11 +197,12 @@ async function loadCachePage(page) {
   } catch {
     res = null; // 发送/回应本身抛错（如 SW 不在）：与回应失败态同一提示
   }
+  lastCacheReadOk = Boolean(res?.ok); // 失败态据此允许「再点已选中的 TAB」重试（见 selectTab）
   if (!res?.ok) {
     renderCacheFailure();
     return;
   }
-  cachePage = res.page; // 越界请求由 background 归一并回告（D5）
+  cachePage = res.page; // 越界请求由 background 归一并回告（cache-inspection D5）
   renderCacheRows(res.entries);
   renderCachePager(res);
   cacheStatus.textContent = res.total ? "" : "缓存为空";
@@ -228,10 +235,11 @@ document.getElementById("clear-logs").addEventListener("click", async () => {
 });
 
 // 「清空缓存」：一次性动作，不是设置项——不参与保存（按钮无 name）、不读配置（开关关着
-// 照清，spec D6）、点击不触发任何 chrome.storage 写入（sync / local 一字不碰，D10），
-// 所以这里不能走 DBG（DBG 会落盘 log-opt）。回应 ok 为真 → 成功文案含条数（0 条不另立
-// 分支）；ok 为假或发送 / 回应抛错 → 失败文案（不含技术细节，故障细节由 background 侧
-// 记日志，D7：用户显式要求的动作必须回报成败，静默或假报成功是缺陷）
+// 照清，cache-manual-clear D6）、点击不触发任何 chrome.storage 写入（sync / local 一字不碰，
+// cache-manual-clear D10），所以这里不能走 DBG（DBG 会落盘 log-opt）。回应 ok 为真 → 成功
+// 文案含条数（0 条不另立分支）；ok 为假或发送 / 回应抛错 → 失败文案（不含技术细节，故障
+// 细节由 background 侧记日志，cache-manual-clear D7：用户显式要求的动作必须回报成败，
+// 静默或假报成功是缺陷）
 document.getElementById("clear-cache").addEventListener("click", async () => {
   let res;
   try {
@@ -240,7 +248,7 @@ document.getElementById("clear-cache").addEventListener("click", async () => {
     res = null; // 发送 / 回应本身抛错（如 SW 不在）：与回应失败态同一失败文案
   }
   flash(res?.ok ? `缓存已清空（${res.removed} 条）` : "缓存清空失败，请重试");
-  // 清空成功 → 表格立即刷新：回到第 1 页重新读取（D6）。失败不动表格
+  // 清空成功 → 表格立即刷新：回到第 1 页重新读取（cache-inspection D6）。失败不动表格
   if (res?.ok) loadCachePage(1);
 });
 
