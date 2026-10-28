@@ -13,6 +13,8 @@
 // 与真实游标删除不扰动既有迭代位置的语义一致——游标遍历的是打开时刻的快照）。
 // 故障注入：failOpen(err) 令后续 open 出错；failRequests(err) 令后续 store 请求出错；
 // clearFailures() 恢复。另暴露 openCalls / upgradeCalls 供「重复打开幂等」断言。
+// seedValue(key, value)：直接改写一条已存在记录的值（不经被测 store 的写入路径），
+// 用于复现旧版本落下的值形态——例如本功能上线前没有 hitCount 字段的记录。
 // reset() 供用例间隔离：records 原地清空——调用方缓存的连接闭包（如 background 的
 // 模块级 store 单例 memoized dbPromise）引用同一 db/store 对象，换库或换 Map 会让
 // 在途连接继续看到旧数据；原地清空则新旧连接看到同一份空库。故障标志与计数一并复位。
@@ -201,6 +203,19 @@ function createFakeIndexedDB() {
     clearFailures() {
       state.failOpenWith = null;
       state.failRequestsWith = null;
+    },
+    // 直接改写一条已存在记录的值（不经被测 store 的写入路径）：复现旧版本落下的值形态，
+    // 例如本功能上线前没有 hitCount 字段的记录。键必须已存在——旧记录正是「旧版写过、
+    // 新版读到」；库/store 由被测 store 的首次操作建立。
+    seedValue(key, value) {
+      for (const db of databases.values()) {
+        for (const store of db.stores.values()) {
+          if (!store.records.has(key)) continue;
+          store.records.set(key, { ...value });
+          return;
+        }
+      }
+      throw new Error(`seedValue: key not found: ${key}`);
     },
     // 全库转储：[{ database, store, key, value }]。真实 IndexedDB 在 devtools 里同样
     // 可逐条查看；这里给测试一个只读观察口，用于断言值的存储形态（如值里不重复保存原文）

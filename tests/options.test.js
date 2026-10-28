@@ -804,10 +804,11 @@ test("恢复默认 + 保存: 提示词组清空后模板与追加提示词两个
 // 接缝：runtime.sendMessage 的 list-cache 消息 ↔ 表格 DOM 与页码/状态文案。
 // 表格是只读视图，不是表单字段：不参与保存、不写配置（D1/D15）。
 
-// 一页条目夹具：原文与回显里都带标签，用于「按纯文本显示」的断言
-const cacheEntry = (n, lastUsedAt = n) => ({
+// 一页条目夹具：原文与回显里都带标签，用于「按纯文本显示」的断言；次数随条目带给设置页
+const cacheEntry = (n, lastUsedAt = n, hitCount = 0) => ({
   original: `<b>orig-${n}</b>`,
   echo: `<html><b>echo-${n}</b></html>`,
+  hitCount,
   lastUsedAt,
 });
 
@@ -833,7 +834,7 @@ test("缓存表格: 在「通用」TAB 面板内，且不是表单字段（不�
   );
 });
 
-test("缓存表格: 进入「通用」TAB 即读取第 1 页，展示原文/回显/最后使用时间", async (t) => {
+test("缓存表格: 进入「通用」TAB 即读取第 1 页，展示原文/回显/次数/最后使用时间", async (t) => {
   const env = await createOptionsSandbox({
     listCacheResult: emptyList({ total: 2, entries: [cacheEntry(2), cacheEntry(1)] }),
   });
@@ -850,7 +851,8 @@ test("缓存表格: 进入「通用」TAB 即读取第 1 页，展示原文/回�
   const [first, second] = env.cacheRows();
   assert.equal(first[0], "<b>orig-2</b>", "第一列：骨架原文");
   assert.equal(first[1], "<html><b>echo-2</b></html>", "第二列：原始回显");
-  assert.equal(first[2], new Date(2).toLocaleString(), "第三列：最后使用时间（本地化）");
+  assert.equal(first[2], "0", "第三列：命中次数（新条目从零开始）");
+  assert.equal(first[3], new Date(2).toLocaleString(), "第四列：最后使用时间（本地化）");
   assert.equal(second[0], "<b>orig-1</b>", "回应顺序原样呈现（倒序由存储/background 保证）");
 });
 
@@ -862,6 +864,7 @@ test("缓存表格: 原文与回显按纯文本显示，缓存里的标签不成
         {
           original: '<img src="x" onerror="boom"><script>window.x = 1</script>',
           echo: "<html><b>粗体</b></html>",
+          hitCount: 0,
           lastUsedAt: 1,
         },
       ],
@@ -1073,4 +1076,39 @@ test("缓存表格: 保存时表格内容不进入配置载荷", async (t) => {
   await env.submit();
 
   assert.deepEqual(env.storedConfig(), { targetLang: "English" }, "只有表单字段落盘");
+});
+
+// ---------------- 缓存表格：命中次数列（cache-inspection 票 02 / spec D3/D8/D14） ----------------
+// 接缝仍是 list-cache 回应 ↔ 表格 DOM。命中次数是按条累计的使用信息，不是全局命中率：
+// 表格只多一列，不新增任何汇总区。旧记录缺字段的归零由 store 负责（D11），列表消息
+// 契约保证每个条目都带 hitCount，设置页因此不再复制一份兼容判定。
+
+test("缓存表格: 表头与每行都有「命中次数」列，次数逐条显示", async (t) => {
+  const env = await createOptionsSandbox({
+    listCacheResult: emptyList({
+      total: 2,
+      entries: [
+        { original: "<b>hot</b>", echo: "echo-hot", hitCount: 7, lastUsedAt: 2 },
+        { original: "<b>cold</b>", echo: "echo-cold", hitCount: 0, lastUsedAt: 1 },
+      ],
+    }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+
+  const headers = [...env.cacheTable.querySelectorAll("thead th")].map((th) => th.textContent);
+  assert.deepEqual(
+    headers,
+    ["原文", "原始回显", "命中次数", "最后使用时间"],
+    "表头四列，命中次数在回显与时间之间",
+  );
+  assert.deepEqual(
+    env.cacheRows(),
+    [
+      ["<b>hot</b>", "echo-hot", "7", new Date(2).toLocaleString()],
+      ["<b>cold</b>", "echo-cold", "0", new Date(1).toLocaleString()],
+    ],
+    "次数按条显示（零次照常显示 0）",
+  );
 });

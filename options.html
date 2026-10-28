@@ -90,7 +90,11 @@
         background: #f7f7f7;
         font-weight: 600;
       }
-      /* 时间列窄一些：前两列才是需要阅读的内容 */
+      /* 命中次数列窄一些（纯数字），时间列次之：前两列才是需要阅读的内容 */
+      #cache-table th:nth-child(3),
+      #cache-table td:nth-child(3) {
+        width: 5em;
+      }
       #cache-table th:last-child,
       #cache-table td:last-child {
         width: 9.5em;
@@ -224,6 +228,7 @@
             <tr>
               <th scope="col">原文</th>
               <th scope="col">原始回显</th>
+              <th scope="col">命中次数</th>
               <th scope="col">最后使用时间</th>
             </tr>
           </thead>

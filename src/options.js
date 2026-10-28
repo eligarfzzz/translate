@@ -132,10 +132,12 @@ tabs.forEach((tab, i) => {
   });
 });
 
-// ---------------- 缓存内容表格（cache-inspection 票 01） ----------------
+// ---------------- 缓存内容表格（cache-inspection 票 01 / 02） ----------------
 // 只读视图：走独立的 list-cache 请求—响应消息（D8），页码与每页条数由本页提出，
-// background 回应归一后的页码与条目。表格不参与保存：所有文本经 textContent 注入，
-// 缓存里的标签不会成为本页元素（D3/D16）。读取失败显示失败提示，不伪装成空库（D9）。
+// background 回应归一后的页码与条目（原文 / 回显 / 命中次数 / 最后使用时间）。表格不参与保存：
+// 所有文本经 textContent 注入，缓存里的标签不会成为本页元素（D3/D16）。命中次数是
+// 每条条目的累计使用信息，不是全局命中率（D14）——只多一列，不新增汇总区。
+// 读取失败显示失败提示，不伪装成空库（D9）。
 const CACHE_PAGE_SIZE = 20; // 每页固定二十条（D4，不可配）
 const cacheRows = document.getElementById("cache-rows");
 const cacheStatus = document.getElementById("cache-status");
@@ -148,7 +150,14 @@ function renderCacheRows(entries) {
   cacheRows.textContent = ""; // 重绘前清空旧行（不用 innerHTML）
   for (const entry of entries) {
     const tr = document.createElement("tr");
-    for (const text of [entry.original, entry.echo, new Date(entry.lastUsedAt).toLocaleString()]) {
+    // 次数与其它列同样走 textContent；缺字段的旧条目已由 store 按零归一（D11）
+    const cells = [
+      entry.original,
+      entry.echo,
+      String(entry.hitCount),
+      new Date(entry.lastUsedAt).toLocaleString(),
+    ];
+    for (const text of cells) {
       const td = document.createElement("td");
       td.textContent = text;
       tr.append(td);

@@ -682,8 +682,8 @@ test("列表消息: 请求 { type, page, pageSize } → 回应 { ok, page, pageS
     pageSize: 20,
     total: 2,
     entries: [
-      { original: "<b>b</b>", echo: "<html><b>乙</b></html>", lastUsedAt: 20 },
-      { original: "<b>a</b>", echo: "<html><b>甲</b></html>", lastUsedAt: 10 },
+      { original: "<b>b</b>", echo: "<html><b>乙</b></html>", hitCount: 0, lastUsedAt: 20 },
+      { original: "<b>a</b>", echo: "<html><b>甲</b></html>", hitCount: 0, lastUsedAt: 10 },
     ],
   });
 });
@@ -765,4 +765,67 @@ test("列表消息: 真实命中后再次查询能看到该条目（与翻译命
   assert.equal(response.total, 1, "成功翻译写入的条目出现在列表里");
   assert.equal(response.entries[0].original, "<p>hi</p>", "原文即骨架 HTML（不含 <html> 包装）");
   assert.equal(response.entries[0].echo, "<html><p>你好</p></html>", "回显即原始回显（含包装）");
+});
+
+// ============================================================
+// 命中次数（cache-inspection 票 02 / spec D8/D10–D13）：
+// 真实命中在库内累加，列表消息把每条累计次数带给设置页。
+// 接缝仍是「端口 start 消息 → 回发」与「runtime list-cache → 回应」，两者读同一份库。
+// ============================================================
+
+test("列表消息: 新写入条目次数为零，真实命中一次后回应里的次数为 1", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [sseResponse(["<html><p>你好</p></html>"])],
+  });
+  await env.start(env.connect(), { text: "<p>hi</p>" }); // 未命中 → 上游 → 写入
+
+  const before = await env.sendRuntimeMessage({ type: "list-cache", page: 1, pageSize: 20 });
+  assert.equal(before.entries[0].hitCount, 0, "写入不算命中：新条目从零开始");
+
+  const hit = env.connect();
+  await env.start(hit, { text: "<p>hi</p>" }); // 真实命中回放
+  assert.equal(env.fetchCalls.length, 1, "命中不发上游请求");
+  assert.deepEqual(ofType(hit, "done"), [{ type: "done", cached: true }], "命中回放形态不变");
+
+  const after = await env.sendRuntimeMessage({ type: "list-cache", page: 1, pageSize: 20 });
+  assert.equal(after.entries[0].hitCount, 1, "命中一次 → 次数 1（与回放同一份库）");
+  assert.equal(after.entries[0].original, "<p>hi</p>");
+});
+
+test("列表消息: 未命中（走上游的真翻）不增加已有条目的次数", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [sseResponse(["<html><p>甲</p></html>"]), sseResponse(["<html><p>乙</p></html>"])],
+  });
+  await env.start(env.connect(), { text: "<p>a</p>" }); // 写入条目 a
+  await env.start(env.connect(), { text: "<p>b</p>" }); // 未命中：新条目 b，不走 a
+
+  const response = await env.sendRuntimeMessage({ type: "list-cache", page: 1, pageSize: 20 });
+  assert.deepEqual(
+    response.entries.map((e) => [e.original, e.hitCount]),
+    [
+      ["<p>b</p>", 0],
+      ["<p>a</p>", 0],
+    ],
+    "两条都是未命中写入：次数皆零，真翻不虚增统计",
+  );
+});
+
+test("列表消息: 两次真实命中累计为 2，覆盖写（同轮重复请求回写）不清零", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [
+      sseResponse(["<html><p>初译</p></html>"]),
+      sseResponse(["<html><p>覆盖译</p></html>"]),
+    ],
+  });
+  await env.start(env.connect(), { text: "<p>hi</p>" }); // 写入
+  await env.start(env.connect(), { text: "<p>hi</p>" }); // 命中 → 1
+  await env.start(env.connect(), { text: "<p>hi</p>" }); // 命中 → 2
+
+  // 直接覆盖写同一键（同轮并发请求各自的回写）：次数保留，回显与时间更新
+  await seedStore(env).put(testFingerprint(), "<p>hi</p>", "<html><p>覆盖译</p></html>", 99);
+
+  const response = await env.sendRuntimeMessage({ type: "list-cache", page: 1, pageSize: 20 });
+  assert.equal(response.entries[0].hitCount, 2, "覆盖写保留已有次数");
+  assert.equal(response.entries[0].echo, "<html><p>覆盖译</p></html>", "回显被覆盖");
+  assert.equal(response.entries[0].lastUsedAt, 99, "时间被覆盖");
 });

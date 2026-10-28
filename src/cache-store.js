@@ -1,9 +1,11 @@
 // 短文本缓存的存储内核（ADR-0008）：IndexedDB 单库单 store，键 = 指纹 + 分隔符 + 骨架原文，
-// 值 = { echo, lastUsedAt }；lastUsedAt 上建索引，过期删除与 LRU 淘汰都经索引游标
+// 值 = { echo, hitCount, lastUsedAt }；lastUsedAt 上建索引，过期删除与 LRU 淘汰都经索引游标
 // 按时间升序扫描。工厂注入 IndexedDB 句柄与日志回调（node 无 IndexedDB，测试以内存假
 // 实现驱动，与 debug.js 注入 storage 同构），模块自身零依赖 chrome API。
 // 降级收口（D10）：所有 IndexedDB 错误只在本模块消化——经注入的日志回调记录后按
 // 「未命中 / 跳过」处理，绝不向调用方抛未捕获异常；调用方因此不需要每处都 try/catch。
+// hitCount 是普通值字段（cache-inspection D12）：不新增仓库 / 索引，数据库版本不变，
+// 旧记录缺字段即零——无全库迁移，读到或命中时自然采用新字段。
 
 const DAY_MS = 86400000; // 一天的毫秒数：过期界 = now - cacheTtlDays * DAY_MS
 
@@ -115,8 +117,9 @@ function createCacheStore({ indexedDB: idb, log = () => {} } = {}) {
     return dbPromise;
   }
 
-  // 读：按键取记录；命中即把 lastUsedAt 刷新为调用方给定的 now（同一事务内读改写），
-  // 返回 { echo }；未命中返回 null；任何 IDB 故障记日志后按未命中处理（D10）
+  // 读：按键取记录；命中即在同一读写事务里把 hitCount 加一、lastUsedAt 刷新为调用方给定的
+  // now（D10：次数与时间同一次命中事务），返回 { echo }；未命中返回 null（不加次数）；
+  // 任何 IDB 故障记日志后按未命中处理（D10）。旧记录缺 hitCount 读作零，首次命中变一。
   async function get(fingerprint, original, now) {
     try {
       const db = await open();
@@ -127,7 +130,10 @@ function createCacheStore({ indexedDB: idb, log = () => {} } = {}) {
         await settledOf(tx);
         return null;
       }
-      store.put({ echo: rec.echo, lastUsedAt: now }, keyOf(fingerprint, original));
+      store.put(
+        { echo: rec.echo, hitCount: (rec.hitCount ?? 0) + 1, lastUsedAt: now },
+        keyOf(fingerprint, original),
+      );
       await settledOf(tx);
       return { echo: rec.echo };
     } catch (e) {
@@ -136,12 +142,17 @@ function createCacheStore({ indexedDB: idb, log = () => {} } = {}) {
     }
   }
 
-  // 写：upsert { echo, lastUsedAt: now }；IDB 故障记日志后静默跳过（D10）
+  // 写：upsert { echo, hitCount, lastUsedAt: now }（D11）。同一事务先读旧值：已存在的键保留其
+  // 现有次数（同轮重复请求的回写不得清零已有统计），新键从零开始；旧记录缺字段同样读作零。
+  // IDB 故障记日志后静默跳过（D10）
   async function put(fingerprint, original, echo, now) {
     try {
       const db = await open();
       const tx = db.transaction(STORE_NAME, "readwrite");
-      tx.objectStore(STORE_NAME).put({ echo, lastUsedAt: now }, keyOf(fingerprint, original));
+      const store = tx.objectStore(STORE_NAME);
+      const key = keyOf(fingerprint, original);
+      const rec = await resultOf(store.get(key));
+      store.put({ echo, hitCount: rec?.hitCount ?? 0, lastUsedAt: now }, key);
       await settledOf(tx);
     } catch (e) {
       log("cache put failed:", e);
@@ -212,7 +223,8 @@ function createCacheStore({ indexedDB: idb, log = () => {} } = {}) {
   // 主键还原（值里不重复保存原文），总条数由 store.count() 给出。页码边界（D5）：
   // 请求页码归一为 [1, 总页数]，空库归一为第 1 页的空结果；归一后的页码随内容一起
   // 返回，调用方不必自己算。返回 { ok: true, page, pageSize, total, entries }，
-  // entries = [{ original, echo, lastUsedAt }]。与翻译路径的降级口径不同：用户主动
+  // entries = [{ original, echo, hitCount, lastUsedAt }]（次数随条目带给设置页，D8；
+  // 旧记录缺 hitCount 按零显示，D11）。与翻译路径的降级口径不同：用户主动
   // 查看时的 IDB 故障记日志并返回 { ok: false }（D9）——设置页据此显示失败提示，
   // 不得伪装成空库；故障不抛给调用方（与其余方法同形）。
   async function list({ page, pageSize }) {
@@ -246,6 +258,7 @@ function createCacheStore({ indexedDB: idb, log = () => {} } = {}) {
           collected.push({
             original: originalOfKey(cursor.primaryKey),
             echo: cursor.value.echo,
+            hitCount: cursor.value.hitCount ?? 0,
             lastUsedAt: cursor.value.lastUsedAt,
           });
           cursor.continue();

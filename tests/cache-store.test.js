@@ -254,6 +254,7 @@ test("列表: 按 lastUsedAt 倒序（最新用在前），每页 20 条，翻�
   assert.deepEqual(first.entries[0], {
     original: "k25",
     echo: "echo-25",
+    hitCount: 0,
     lastUsedAt: 25,
   });
 
@@ -330,8 +331,8 @@ test("列表: 原文从主键还原（含键分隔符的原文无损），值里
   const [record] = fake.dump();
   assert.deepEqual(
     Object.keys(record.value).sort(),
-    ["echo", "lastUsedAt"],
-    "值只存 { echo, lastUsedAt }：原文不重复保存",
+    ["echo", "hitCount", "lastUsedAt"],
+    "值只存 { echo, hitCount, lastUsedAt }：原文不重复保存",
   );
   assert.ok(record.key.endsWith(tricky), "原文只在主键里出现一次");
 });
@@ -357,4 +358,120 @@ test("列表: 打开失败同样返回 { ok: false }，不抛", async () => {
 
   assert.deepEqual(await store.list({ page: 1, pageSize: PAGE_SIZE }), { ok: false });
   assert.ok(logs[0].includes("cache list failed") && logs[0].includes("open boom"));
+});
+
+// ---------------- 存储：命中次数（cache-inspection 票 02 / spec D10–D13） ----------------
+// 接缝：put / get / list 的外部可观察结果——新键为零、真实命中加一、未命中不动、
+// 旧记录缺字段读作零、覆盖写保留、删除后重建归零。次数与 lastUsedAt 同属一次命中
+// 事务：命中一次后从 list() 同时看到新次数与新时间（两者各自都是「这次命中」的值）。
+
+test("次数: 新键写入为零，列表里读到的也是零（写入不算命中）", async () => {
+  const { store } = makeEnv();
+  await store.put(FP_A, "fresh", "echo-fresh", 1);
+
+  const page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.entries[0].hitCount, 0, "写入只建立条目，不增加次数");
+});
+
+test("次数: 真实命中加一，连续命中逐次累加；未命中不增加任何条目", async () => {
+  const { store } = makeEnv();
+  await store.put(FP_A, "hot", "echo-hot", 1);
+
+  await store.get(FP_A, "hot", 2);
+  let page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.entries[0].hitCount, 1, "第一次命中 → 1");
+
+  await store.get(FP_A, "hot", 3);
+  await store.get(FP_A, "hot", 4);
+  page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.entries[0].hitCount, 3, "连续命中逐次累加");
+
+  assert.equal(await store.get(FP_A, "never-written", 5), null, "未命中照旧返回 null");
+  page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.total, 1, "未命中不新建条目");
+  assert.equal(page.entries[0].hitCount, 3, "未命中不改变已有条目的次数");
+});
+
+test("次数: 命中同时刷新 lastUsedAt——两者在同一次命中里一起更新", async () => {
+  const { store } = makeEnv();
+  await store.put(FP_A, "hot", "echo-hot", 1000);
+  await store.get(FP_A, "hot", 2000);
+
+  const page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.entries[0].hitCount, 1, "次数来自这次命中");
+  assert.equal(page.entries[0].lastUsedAt, 2000, "时间同样来自这次命中");
+});
+
+test("次数: 旧记录缺 hitCount 字段 → 列表按零显示，首次命中后变 1（不追溯历史）", async () => {
+  const { fake, store } = makeEnv();
+  await store.put(FP_A, "legacy", "echo-legacy", 10);
+  // 旧版本落下的值形态：只有 { echo, lastUsedAt }（键从转储里取，不在这里重建键形）
+  const legacyKey = fake.dump().find((record) => record.key.endsWith("legacy")).key;
+  fake.seedValue(legacyKey, { echo: "echo-legacy", lastUsedAt: 10 });
+
+  let page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.entries[0].hitCount, 0, "缺字段读作零，不报错");
+
+  assert.deepEqual(await store.get(FP_A, "legacy", 20), { echo: "echo-legacy" });
+  page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.entries[0].hitCount, 1, "旧条目首次命中后变 1，此前历史无从恢复");
+  assert.equal(page.entries[0].lastUsedAt, 20);
+});
+
+test("次数: 覆盖写保留已有次数（只换回显与时间）", async () => {
+  const { store } = makeEnv();
+  await store.put(FP_A, "k", "echo-v1", 1);
+  await store.get(FP_A, "k", 2);
+  await store.get(FP_A, "k", 3); // 两次命中 → 2
+
+  await store.put(FP_A, "k", "echo-v2", 4); // 同轮重复请求的上游结果覆盖写
+
+  const page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.entries[0].echo, "echo-v2", "回显更新");
+  assert.equal(page.entries[0].lastUsedAt, 4, "时间更新");
+  assert.equal(page.entries[0].hitCount, 2, "覆盖写不清零已有次数");
+
+  assert.deepEqual(await store.get(FP_A, "k", 5), { echo: "echo-v2" }, "命中回放用新回显");
+  const after = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(after.entries[0].hitCount, 3, "覆盖写之后继续累加");
+});
+
+test("次数: 手动清空后同键重建从零开始", async () => {
+  const { store } = makeEnv();
+  await store.put(FP_A, "k", "echo-a", 1);
+  await store.get(FP_A, "k", 2);
+  assert.equal((await store.list({ page: 1, pageSize: PAGE_SIZE })).entries[0].hitCount, 1);
+
+  await store.clear();
+  await store.put(FP_A, "k", "echo-b", 3);
+
+  const page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.entries[0].echo, "echo-b");
+  assert.equal(page.entries[0].hitCount, 0, "被删条目的统计不转移到新条目");
+});
+
+test("次数: 过期删除后同键重建从零开始", async () => {
+  const { store } = makeEnv();
+  await store.put(FP_A, "k", "echo-old", 0);
+  await store.get(FP_A, "k", 1);
+
+  await store.cleanup({ now: 100 * DAY_MS, ttlDays: 30, maxEntries: 100 }); // 过期删除
+  await store.put(FP_A, "k", "echo-new", 100 * DAY_MS);
+
+  const page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.entries[0].hitCount, 0, "过期删除即丢统计");
+});
+
+test("次数: 容量淘汰后同键重建从零开始", async () => {
+  const { store } = makeEnv();
+  await store.put(FP_A, "old", "echo-old", 1);
+  await store.get(FP_A, "old", 2);
+  await store.put(FP_A, "new", "echo-new", 3);
+
+  await store.cleanup({ now: 10, ttlDays: 30, maxEntries: 1 }); // 淘汰最久未用的 old
+  await store.put(FP_A, "old", "echo-reborn", 4);
+
+  const page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  const reborn = page.entries.find((e) => e.original === "old");
+  assert.equal(reborn.hitCount, 0, "淘汰即丢统计");
 });

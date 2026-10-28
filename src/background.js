@@ -205,10 +205,11 @@ function cacheableEcho(full) {
 //     通道打开（return true）。清空与 cacheEnabled 无关（D6）：不加载配置，开关关着照清。
 //     失败留痕由 store 经注入的日志回调（本文件的 DBG.error 通道）完成，本分支不重复记
 //     第二条，也不另设 try/catch——store 的 clear() 本身不抛（D10 收口）。
-//   list-cache（设置页分页查看，cache-inspection 票 01）：独立的请求—响应消息，与清空 /
+//   list-cache（设置页分页查看，cache-inspection 票 01 / 02）：独立的请求—响应消息，与清空 /
 //     清理各自契约、不合并成带模式参数的消息（D8）。请求携带 page / pageSize，回应
 //     { ok: true, page, pageSize, total, entries } 或失败态 { ok: false }（D9：主动读取的
-//     故障必须可见）。不读配置也不看 cacheEnabled——展示的是整库实际内容（D2），
+//     故障必须可见）；entries 的每个条目带 original / echo / hitCount / lastUsedAt（D8）。
+//     不读配置也不看 cacheEnabled——展示的是整库实际内容（D2），
 //     与手动清空同一范围；数据库结构知识因此仍只在 store 模块（本分支只转交页码）。
 //   cleanup-cache（自动清理触发，D7）：content 在每会话首轮落定后发来；缓存开才以当前配置
 //     执行一次清理（删过期 + 淘超限），缓存关一律不清。清理失败只记日志——它没有也不该有
@@ -280,7 +281,8 @@ chrome.runtime.onConnect.addListener((port) => {
       // 短文本缓存查询（D2/D3）：未配置守卫之后、fetch 之前；开关开且骨架字节过门才查，
       // 指纹按当次 loadConfig 结果现算。命中 = 回放一条缓存回显全文 delta +
       // done{cached:true}，不发上游请求——content 的预览/定稿/落定/计数零改动，
-      // 看到一次普通的快速应答。lastUsedAt 的命中刷新在 store 内部同事务完成。
+      // 看到一次普通的快速应答。lastUsedAt 的命中刷新与 hitCount 递增在 store 内部
+      // 同一次读写事务里完成（cache-inspection D10）——命中路径本身一字未变。
       const cacheable = cfg.cacheEnabled && fitsCacheBytes(hostHtml, cfg.cacheMaxBytes);
       const fingerprint = cacheable ? cacheFingerprint(cfg) : null;
       if (cacheable) {
