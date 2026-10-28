@@ -111,6 +111,8 @@ for (const btn of document.querySelectorAll("[data-restore]")) {
 // TAB 切换：hidden 切面板、aria-selected 切标签态，左右方向键在标签间移动焦点
 const tabs = [...document.querySelectorAll('[role="tab"]')];
 function selectTab(tab) {
+  // 点击当前已选中的 TAB 是空操作：不重读、不动页码（离开再回来才是新一轮读取，见下）
+  if (tab.getAttribute("aria-selected") === "true") return;
   for (const t of tabs) {
     const on = t === tab;
     t.setAttribute("aria-selected", String(on));
@@ -133,8 +135,8 @@ tabs.forEach((tab, i) => {
 });
 
 // ---------------- 缓存内容表格（cache-inspection 票 01 / 02） ----------------
-// 只读视图：走独立的 list-cache 请求—响应消息（D8），页码与每页条数由本页提出，
-// background 回应归一后的页码与条目（原文 / 回显 / 命中次数 / 最后使用时间）。表格不参与保存：
+// 只读视图：走独立的 list-cache 请求—响应消息（cache-inspection D8），页码与每页条数由本页提出，
+// background 回应归一后的页码与条目（骨架原文 / 回显 / 命中次数 / 最后使用时间）。表格不参与保存：
 // 所有文本经 textContent 注入，缓存里的标签不会成为本页元素（D3/D16）。命中次数是
 // 每条条目的累计使用信息，不是全局命中率（D14）——只多一列，不新增汇总区。
 // 读取失败显示失败提示，不伪装成空库（D9）。

@@ -65,8 +65,8 @@
         color: #888;
         margin-top: 4px;
       }
-      /* 缓存内容表格：只读视图。单元格里的原文/回显是任意长度文本——长词断行、
-         原文回显保留换行（pre-wrap），否则一行长骨架会把表格撑出页面 */
+      /* 缓存内容表格：只读视图。单元格里的骨架原文/回显是任意长度文本——长词断行、
+         两者都保留换行（pre-wrap），否则一行长骨架会把表格撑出页面 */
       .cache-title {
         font-size: 1em;
         margin: 20px 0 6px;
@@ -226,7 +226,7 @@
         <table id="cache-table" aria-label="短文本缓存内容">
           <thead>
             <tr>
-              <th scope="col">原文</th>
+              <th scope="col">骨架原文</th>
               <th scope="col">原始回显</th>
               <th scope="col">命中次数</th>
               <th scope="col">最后使用时间</th>

@@ -804,12 +804,13 @@ test("恢复默认 + 保存: 提示词组清空后模板与追加提示词两个
 // 接缝：runtime.sendMessage 的 list-cache 消息 ↔ 表格 DOM 与页码/状态文案。
 // 表格是只读视图，不是表单字段：不参与保存、不写配置（D1/D15）。
 
-// 一页条目夹具：原文与回显里都带标签，用于「按纯文本显示」的断言；次数随条目带给设置页
-const cacheEntry = (n, lastUsedAt = n, hitCount = 0) => ({
+// 一页条目夹具：原文与回显里都带标签，用于「按纯文本显示」的断言；最后使用时间取 n 本身
+// （列表按它倒序），次数固定零——需要别的次数时直接写条目字面量
+const cacheEntry = (n) => ({
   original: `<b>orig-${n}</b>`,
   echo: `<html><b>echo-${n}</b></html>`,
-  hitCount,
-  lastUsedAt,
+  hitCount: 0,
+  lastUsedAt: n,
 });
 
 const emptyList = (overrides = {}) => ({
@@ -1023,6 +1024,30 @@ test("缓存表格: 清空失败时不重新读取（表格保留原内容）", 
   assert.deepEqual(env.cacheRows(), before, "表格内容不变");
 });
 
+test("缓存表格: 点击已选中的「通用」TAB 不重新读取、不改变当前页", async (t) => {
+  const env = await createOptionsSandbox({
+    listCacheResult: (msg) =>
+      msg.page === 1
+        ? emptyList({ page: 1, total: 45, entries: [cacheEntry(45)] })
+        : emptyList({ page: 2, total: 45, entries: [cacheEntry(24)] }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+  await env.clickNext(); // 用户翻到第 2 页
+  assert.equal(env.pageInfo.textContent, "第 2 / 3 页 · 共 45 条", "前置：已停在第 2 页");
+
+  await env.selectTab("general"); // 再点一次当前已选中的 TAB
+
+  assert.equal(
+    env.sentMessages.filter((m) => m.type === "list-cache").length,
+    2,
+    "点击已选中的 TAB 不重新读取（此前只有进入与翻页各一次）",
+  );
+  assert.equal(env.pageInfo.textContent, "第 2 / 3 页 · 共 45 条", "页码不变");
+  assert.equal(env.cacheRows()[0][0], "<b>orig-24</b>", "表格仍是第 2 页内容");
+});
+
 test("缓存表格: 离开再进入「通用」TAB 重新读取第 1 页", async (t) => {
   const env = await createOptionsSandbox({
     listCacheResult: emptyList({ total: 1, entries: [cacheEntry(1)] }),
@@ -1100,8 +1125,8 @@ test("缓存表格: 表头与每行都有「命中次数」列，次数逐条显
   const headers = [...env.cacheTable.querySelectorAll("thead th")].map((th) => th.textContent);
   assert.deepEqual(
     headers,
-    ["原文", "原始回显", "命中次数", "最后使用时间"],
-    "表头四列，命中次数在回显与时间之间",
+    ["骨架原文", "原始回显", "命中次数", "最后使用时间"],
+    "表头四列，首列用领域词表的「骨架原文」，命中次数在回显与时间之间",
   );
   assert.deepEqual(
     env.cacheRows(),

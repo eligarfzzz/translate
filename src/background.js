@@ -15,7 +15,7 @@ const DBG = getChannel("bg", chrome.storage);
 
 // 短文本缓存（ADR-0008）：service worker 生命周期一个存储实例；indexedDB 全局现取
 // （node 测试由沙箱在 import 前注入替身）。一切 IDB 故障在 cache-store 模块内消化为
-// 「未命中 / 跳过」并经此日志回调落痕——D10 的降级只收口在 cache-store（票 02 裁决），
+// 「未命中 / 跳过」并经此日志回调落痕——短文本缓存 D10 的降级只收口在 cache-store（票 02 裁决），
 // 本文件不再设第二条 try/catch 路径。错误对象先 String 化再走日志，保住消息本体。
 const cache = createCacheStore({
   indexedDB: globalThis.indexedDB,
@@ -204,7 +204,7 @@ function cacheableEcho(full) {
 //   clear-cache（手动清空，票 01）：整库清空并异步回应 { ok, removed }——该分支保持回应
 //     通道打开（return true）。清空与 cacheEnabled 无关（D6）：不加载配置，开关关着照清。
 //     失败留痕由 store 经注入的日志回调（本文件的 DBG.error 通道）完成，本分支不重复记
-//     第二条，也不另设 try/catch——store 的 clear() 本身不抛（D10 收口）。
+//     第二条，也不另设 try/catch——store 的 clear() 本身不抛（短文本缓存 D10 收口）。
 //   list-cache（设置页分页查看，cache-inspection 票 01 / 02）：独立的请求—响应消息，与清空 /
 //     清理各自契约、不合并成带模式参数的消息（D8）。请求携带 page / pageSize，回应
 //     { ok: true, page, pageSize, total, entries } 或失败态 { ok: false }（D9：主动读取的

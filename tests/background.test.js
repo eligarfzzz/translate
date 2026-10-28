@@ -753,6 +753,25 @@ test("列表消息: IDB 故障回应 { ok: false }（不伪装成空库）且留
   );
 });
 
+test("列表消息: 超大 pageSize 被截到 100，回应里的 pageSize 是实际生效值", async () => {
+  const env = await createBackgroundSandbox();
+  const rows = Array.from({ length: 120 }, (_, i) => ({
+    original: `<b>k${i + 1}</b>`,
+    echo: `echo-${i + 1}`,
+    lastUsedAt: i + 1,
+  }));
+  await seedEntries(env, rows);
+
+  const response = await env.sendRuntimeMessage({ type: "list-cache", page: 1, pageSize: 100000 });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.pageSize, 100, "上界 100：异常调用不会一次取走整库");
+  assert.equal(response.total, 120);
+  assert.equal(response.entries.length, 100, "回应条数等于生效的每页条数");
+  assert.equal(response.page, 1);
+  assert.equal(response.entries[0].original, "<b>k120</b>", "截断只影响条数，倒序不变");
+});
+
 test("列表消息: 真实命中后再次查询能看到该条目（与翻译命中路径同一份库）", async () => {
   const env = await createBackgroundSandbox({
     responses: [sseResponse(["<html><p>你好</p></html>"])],
@@ -812,10 +831,7 @@ test("列表消息: 未命中（走上游的真翻）不增加已有条目的次
 
 test("列表消息: 两次真实命中累计为 2，覆盖写（同轮重复请求回写）不清零", async () => {
   const env = await createBackgroundSandbox({
-    responses: [
-      sseResponse(["<html><p>初译</p></html>"]),
-      sseResponse(["<html><p>覆盖译</p></html>"]),
-    ],
+    responses: [sseResponse(["<html><p>初译</p></html>"])],
   });
   await env.start(env.connect(), { text: "<p>hi</p>" }); // 写入
   await env.start(env.connect(), { text: "<p>hi</p>" }); // 命中 → 1

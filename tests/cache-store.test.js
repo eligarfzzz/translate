@@ -319,6 +319,26 @@ test("列表: 越界页归一到有效页（超出取末页，小于 1 取首页
   assert.equal(below.entries.length, PAGE_SIZE);
 });
 
+test("列表: 每页条数限在 1–100（超界请求按 100 生效，回应里是实际生效值）", async () => {
+  const { store } = makeEnv();
+  for (let i = 1; i <= 120; i++) await store.put(FP_A, `k${i}`, `echo-${i}`, i);
+
+  const huge = await store.list({ page: 1, pageSize: 100000 });
+  assert.equal(huge.pageSize, 100, "超大每页条数截到上限，回应里的 pageSize 是实际生效值");
+  assert.equal(huge.entries.length, 100, "一次最多返回 100 条，不把整库取走");
+  assert.equal(huge.page, 1);
+  assert.equal(huge.entries[0].original, "k120", "截断只影响条数，顺序不变");
+
+  const exact = await store.list({ page: 2, pageSize: 100 });
+  assert.equal(exact.pageSize, 100, "恰好 100 照常生效");
+  assert.equal(exact.page, 2, "总页数按生效条数算：120 条 = 两页");
+  assert.equal(exact.entries.length, 20, "第二页是余下的 20 条");
+
+  const below = await store.list({ page: 1, pageSize: 0 });
+  assert.equal(below.pageSize, 1, "下界 1：零或负数按一条");
+  assert.equal(below.entries.length, 1);
+});
+
 test("列表: 原文从主键还原（含键分隔符的原文无损），值里不重复保存原文", async () => {
   const { fake, store } = makeEnv();
   const tricky = "<b>a</b>\x1f<b>b</b>"; // 原文自身含键分隔符
