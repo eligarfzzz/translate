@@ -651,3 +651,118 @@ test("清空消息: 清空后同一原文重走上游，落定形态与未命中
     "落定形态与未命中路径逐字节一致：无 cached 标志、无 restart/error",
   );
 });
+
+// ============================================================
+// 缓存列表消息（list-cache，cache-inspection 票 01 / spec D2/D8/D9）：
+// 独立的请求—响应消息，整库分页读取；与 clear-cache / cleanup-cache 各自契约，
+// 不合并成带模式参数的消息。开关关闭与指纹无关地照常可读（D2）。
+// ============================================================
+
+// 直种条目：与 background 模块内的 store 单例读写同一份假库
+async function seedEntries(env, rows) {
+  const seed = seedStore(env);
+  const fp = testFingerprint();
+  for (const { original, echo, lastUsedAt } of rows) {
+    await seed.put(fp, original, echo, lastUsedAt);
+  }
+}
+
+test("列表消息: 请求 { type, page, pageSize } → 回应 { ok, page, pageSize, total, entries }", async () => {
+  const env = await createBackgroundSandbox({ responses: [] });
+  await seedEntries(env, [
+    { original: "<b>a</b>", echo: "<html><b>甲</b></html>", lastUsedAt: 10 },
+    { original: "<b>b</b>", echo: "<html><b>乙</b></html>", lastUsedAt: 20 },
+  ]);
+
+  const response = await env.sendRuntimeMessage({ type: "list-cache", page: 1, pageSize: 20 });
+
+  assert.deepEqual(response, {
+    ok: true,
+    page: 1,
+    pageSize: 20,
+    total: 2,
+    entries: [
+      { original: "<b>b</b>", echo: "<html><b>乙</b></html>", lastUsedAt: 20 },
+      { original: "<b>a</b>", echo: "<html><b>甲</b></html>", lastUsedAt: 10 },
+    ],
+  });
+});
+
+test("列表消息: cacheEnabled 关闭时照样可读（开关只管自动链路）", async () => {
+  const env = await createBackgroundSandbox({ config: { cacheEnabled: false }, responses: [] });
+  await seedEntries(env, [{ original: "<b>a</b>", echo: "echo-a", lastUsedAt: 1 }]);
+
+  const response = await env.sendRuntimeMessage({ type: "list-cache", page: 1, pageSize: 20 });
+
+  assert.equal(response.ok, true, "开关关着仍能读取");
+  assert.equal(response.total, 1);
+  assert.deepEqual(
+    response.entries.map((e) => e.original),
+    ["<b>a</b>"],
+  );
+});
+
+test("列表消息: 整库——异指纹条目也在回应里（不按当前指纹过滤）", async () => {
+  const env = await createBackgroundSandbox({ responses: [] });
+  const seed = seedStore(env);
+  const fpOther = cacheFingerprint(
+    mergeConfig(TRANSLATE_CONFIG, { ...DEFAULT_CONFIG, model: "other-model" }),
+  );
+  await seed.put(testFingerprint(), "<b>now</b>", "echo-now", 2);
+  await seed.put(fpOther, "<b>old</b>", "echo-old", 1);
+
+  const response = await env.sendRuntimeMessage({ type: "list-cache", page: 1, pageSize: 20 });
+
+  assert.deepEqual(
+    response.entries.map((e) => e.original),
+    ["<b>now</b>", "<b>old</b>"],
+    "两个指纹的条目都在，仍按 lastUsedAt 倒序",
+  );
+});
+
+test("列表消息: 越界页回应归一后的页码与该页内容；空库回应第 1 页的空列表", async () => {
+  const env = await createBackgroundSandbox({ responses: [] });
+  await seedEntries(env, [
+    { original: "<b>a</b>", echo: "echo-a", lastUsedAt: 1 },
+    { original: "<b>b</b>", echo: "echo-b", lastUsedAt: 2 },
+  ]);
+
+  const beyond = await env.sendRuntimeMessage({ type: "list-cache", page: 7, pageSize: 1 });
+  assert.equal(beyond.page, 2, "两页库请求第 7 页 → 归一到末页");
+  assert.deepEqual(
+    beyond.entries.map((e) => e.original),
+    ["<b>a</b>"],
+  );
+
+  const empty = await createBackgroundSandbox({ responses: [] });
+  const blank = await empty.sendRuntimeMessage({ type: "list-cache", page: 3, pageSize: 20 });
+  assert.deepEqual(blank, { ok: true, page: 1, pageSize: 20, total: 0, entries: [] });
+});
+
+test("列表消息: IDB 故障回应 { ok: false }（不伪装成空库）且留痕", async () => {
+  const env = await createBackgroundSandbox({ responses: [] });
+  await seedEntries(env, [{ original: "<b>a</b>", echo: "echo-a", lastUsedAt: 1 }]);
+
+  env.fakeIdb.failRequests(new Error("idb boom"));
+  const response = await env.sendRuntimeMessage({ type: "list-cache", page: 1, pageSize: 20 });
+
+  assert.deepEqual(response, { ok: false }, "失败态与空库可区分");
+  assert.ok(
+    env.errorLines.some((line) => line.includes("cache list failed") && line.includes("idb boom")),
+    "故障经既有日志通道留痕",
+  );
+});
+
+test("列表消息: 真实命中后再次查询能看到该条目（与翻译命中路径同一份库）", async () => {
+  const env = await createBackgroundSandbox({
+    responses: [sseResponse(["<html><p>你好</p></html>"])],
+  });
+  await env.start(env.connect(), { text: "<p>hi</p>" }); // 未命中 → 上游 → 写入
+
+  const response = await env.sendRuntimeMessage({ type: "list-cache", page: 1, pageSize: 20 });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.total, 1, "成功翻译写入的条目出现在列表里");
+  assert.equal(response.entries[0].original, "<p>hi</p>", "原文即骨架 HTML（不含 <html> 包装）");
+  assert.equal(response.entries[0].echo, "<html><p>你好</p></html>", "回显即原始回显（含包装）");
+});

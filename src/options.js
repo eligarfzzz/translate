@@ -117,6 +117,8 @@ function selectTab(tab) {
     t.tabIndex = on ? 0 : -1;
     document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
   }
+  // 进入「通用」TAB 就读第 1 页（D6）：不持续自动刷新，每次进入都是一次新读取
+  if (tab.getAttribute("aria-controls") === "panel-general") loadCachePage(1);
 }
 tabs.forEach((tab, i) => {
   tab.addEventListener("click", () => selectTab(tab));
@@ -129,6 +131,67 @@ tabs.forEach((tab, i) => {
     next.focus();
   });
 });
+
+// ---------------- 缓存内容表格（cache-inspection 票 01） ----------------
+// 只读视图：走独立的 list-cache 请求—响应消息（D8），页码与每页条数由本页提出，
+// background 回应归一后的页码与条目。表格不参与保存：所有文本经 textContent 注入，
+// 缓存里的标签不会成为本页元素（D3/D16）。读取失败显示失败提示，不伪装成空库（D9）。
+const CACHE_PAGE_SIZE = 20; // 每页固定二十条（D4，不可配）
+const cacheRows = document.getElementById("cache-rows");
+const cacheStatus = document.getElementById("cache-status");
+const pageInfo = document.getElementById("cache-page-info");
+const prevPage = document.getElementById("cache-prev");
+const nextPage = document.getElementById("cache-next");
+let cachePage = 1; // 当前展示的页码（取回应里的归一页码，而不是请求页码）
+
+function renderCacheRows(entries) {
+  cacheRows.textContent = ""; // 重绘前清空旧行（不用 innerHTML）
+  for (const entry of entries) {
+    const tr = document.createElement("tr");
+    for (const text of [entry.original, entry.echo, new Date(entry.lastUsedAt).toLocaleString()]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.append(td);
+    }
+    cacheRows.append(tr);
+  }
+}
+
+// 翻页按钮与页码文案跟随当次回应：空库/失败态两个按钮都禁用
+function renderCachePager({ total, page, pageSize }) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  pageInfo.textContent = `第 ${page} / ${pages} 页 · 共 ${total} 条`;
+  prevPage.disabled = page <= 1;
+  nextPage.disabled = page >= pages;
+}
+
+function renderCacheFailure() {
+  cacheRows.textContent = "";
+  cacheStatus.textContent = "缓存读取失败，请重试";
+  pageInfo.textContent = "";
+  prevPage.disabled = true;
+  nextPage.disabled = true;
+}
+
+async function loadCachePage(page) {
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: "list-cache", page, pageSize: CACHE_PAGE_SIZE });
+  } catch {
+    res = null; // 发送/回应本身抛错（如 SW 不在）：与回应失败态同一提示
+  }
+  if (!res?.ok) {
+    renderCacheFailure();
+    return;
+  }
+  cachePage = res.page; // 越界请求由 background 归一并回告（D5）
+  renderCacheRows(res.entries);
+  renderCachePager(res);
+  cacheStatus.textContent = res.total ? "" : "缓存为空";
+}
+
+prevPage.addEventListener("click", () => loadCachePage(cachePage - 1));
+nextPage.addEventListener("click", () => loadCachePage(cachePage + 1));
 
 // 导出日志：合并三通道按时间排序，下载为 JSON 文件
 document.getElementById("export-logs").addEventListener("click", async () => {
@@ -166,6 +229,8 @@ document.getElementById("clear-cache").addEventListener("click", async () => {
     res = null; // 发送 / 回应本身抛错（如 SW 不在）：与回应失败态同一失败文案
   }
   flash(res?.ok ? `缓存已清空（${res.removed} 条）` : "缓存清空失败，请重试");
+  // 清空成功 → 表格立即刷新：回到第 1 页重新读取（D6）。失败不动表格
+  if (res?.ok) loadCachePage(1);
 });
 
 fillPlaceholders();

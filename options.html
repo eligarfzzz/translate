@@ -65,6 +65,52 @@
         color: #888;
         margin-top: 4px;
       }
+      /* 缓存内容表格：只读视图。单元格里的原文/回显是任意长度文本——长词断行、
+         原文回显保留换行（pre-wrap），否则一行长骨架会把表格撑出页面 */
+      .cache-title {
+        font-size: 1em;
+        margin: 20px 0 6px;
+      }
+      #cache-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85em;
+        table-layout: fixed;
+      }
+      #cache-table th,
+      #cache-table td {
+        border: 1px solid #ddd;
+        padding: 4px 6px;
+        text-align: left;
+        vertical-align: top;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+      #cache-table th {
+        background: #f7f7f7;
+        font-weight: 600;
+      }
+      /* 时间列窄一些：前两列才是需要阅读的内容 */
+      #cache-table th:last-child,
+      #cache-table td:last-child {
+        width: 9.5em;
+      }
+      .cache-pager {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+        font-size: 0.85em;
+      }
+      .cache-pager button {
+        margin-top: 0; /* 抵消全局 button { margin-top: 16px } */
+        padding: 4px 10px;
+        font: inherit;
+      }
+      .cache-pager button:disabled {
+        cursor: default;
+        color: #aaa;
+      }
     </style>
   </head>
   <body>
@@ -169,6 +215,27 @@
         <button type="button" id="clear-logs">清空日志</button>
         <!-- 一次性动作按钮，与「保存」无关：绝不能带 name（两个反向守门要求表单 name ⊆ 默认值表键） -->
         <button type="button" id="clear-cache">清空缓存</button>
+
+        <!-- 缓存内容：只读视图，不是设置项——表格里没有任何带 name 的控件，不参与保存。
+             全部文本经 textContent 注入，缓存里的标签不会成为本页元素。 -->
+        <h2 class="cache-title">缓存内容</h2>
+        <table id="cache-table" aria-label="短文本缓存内容">
+          <thead>
+            <tr>
+              <th scope="col">原文</th>
+              <th scope="col">原始回显</th>
+              <th scope="col">最后使用时间</th>
+            </tr>
+          </thead>
+          <tbody id="cache-rows"></tbody>
+        </table>
+        <p id="cache-status" class="hint" role="status"></p>
+        <div class="cache-pager">
+          <button type="button" id="cache-prev" disabled>上一页</button>
+          <span id="cache-page-info"></span>
+          <button type="button" id="cache-next" disabled>下一页</button>
+        </div>
+
         <p class="hint">
           运行日志本地落盘（chrome.storage.local，每通道最近 500
           条，密钥自动脱敏）：翻译流程日志在网页控制台（勾选 Verbose），API 请求日志在扩展的 Service

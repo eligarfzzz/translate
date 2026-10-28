@@ -702,7 +702,12 @@ test("清空缓存: 点击恰好发出一条 clear-cache 消息（类型与载�
 
   await env.clearCache();
 
-  assert.deepEqual(env.sentMessages, [{ type: "clear-cache" }], "恰好一条，载荷无多余键");
+  // 清空成功后表格会回到第 1 页重新读取（cache-inspection D6），故只看 clear-cache 那一条
+  assert.deepEqual(
+    env.sentMessages.filter((m) => m.type === "clear-cache"),
+    [{ type: "clear-cache" }],
+    "恰好一条，载荷无多余键",
+  );
 });
 
 test("清空缓存: 成功回应 → 状态栏文案含回应里的条数", async (t) => {
@@ -744,7 +749,10 @@ test("清空缓存: 存储里 cacheEnabled 为 false 时照样发出（开关与
 
   await env.clearCache();
 
-  assert.deepEqual(env.sentMessages, [{ type: "clear-cache" }]);
+  assert.deepEqual(
+    env.sentMessages.filter((m) => m.type === "clear-cache"),
+    [{ type: "clear-cache" }],
+  );
   assert.equal(env.status.textContent, "缓存已清空（2 条）");
 });
 
@@ -790,4 +798,279 @@ test("恢复默认 + 保存: 提示词组清空后模板与追加提示词两个
     DEFAULT_PROMPT_TEMPLATE,
     "占位即默认模板全文",
   );
+});
+
+// ---------------- 短文本缓存表格（cache-inspection 票 01） ----------------
+// 接缝：runtime.sendMessage 的 list-cache 消息 ↔ 表格 DOM 与页码/状态文案。
+// 表格是只读视图，不是表单字段：不参与保存、不写配置（D1/D15）。
+
+// 一页条目夹具：原文与回显里都带标签，用于「按纯文本显示」的断言
+const cacheEntry = (n, lastUsedAt = n) => ({
+  original: `<b>orig-${n}</b>`,
+  echo: `<html><b>echo-${n}</b></html>`,
+  lastUsedAt,
+});
+
+const emptyList = (overrides = {}) => ({
+  ok: true,
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  entries: [],
+  ...overrides,
+});
+
+test("缓存表格: 在「通用」TAB 面板内，且不是表单字段（不进保存）", async (t) => {
+  const env = await createOptionsSandbox();
+  t.after(() => env.dispose());
+
+  const panel = env.doc.getElementById("panel-general");
+  assert.ok(panel.contains(env.cacheTable), "表格位于「通用」面板内");
+  assert.equal(
+    env.cacheTable.querySelectorAll("[name]").length,
+    0,
+    "表格内没有任何带 name 的控件（不参与保存）",
+  );
+});
+
+test("缓存表格: 进入「通用」TAB 即读取第 1 页，展示原文/回显/最后使用时间", async (t) => {
+  const env = await createOptionsSandbox({
+    listCacheResult: emptyList({ total: 2, entries: [cacheEntry(2), cacheEntry(1)] }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+
+  assert.deepEqual(
+    env.sentMessages,
+    [{ type: "list-cache", page: 1, pageSize: 20 }],
+    "进入 TAB 恰好发出一条列表请求，页码 1、每页 20",
+  );
+  assert.equal(env.cacheRows().length, 2, "两条条目各一行");
+  const [first, second] = env.cacheRows();
+  assert.equal(first[0], "<b>orig-2</b>", "第一列：骨架原文");
+  assert.equal(first[1], "<html><b>echo-2</b></html>", "第二列：原始回显");
+  assert.equal(first[2], new Date(2).toLocaleString(), "第三列：最后使用时间（本地化）");
+  assert.equal(second[0], "<b>orig-1</b>", "回应顺序原样呈现（倒序由存储/background 保证）");
+});
+
+test("缓存表格: 原文与回显按纯文本显示，缓存里的标签不成为设置页元素", async (t) => {
+  const env = await createOptionsSandbox({
+    listCacheResult: emptyList({
+      total: 1,
+      entries: [
+        {
+          original: '<img src="x" onerror="boom"><script>window.x = 1</script>',
+          echo: "<html><b>粗体</b></html>",
+          lastUsedAt: 1,
+        },
+      ],
+    }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+
+  const row = env.cacheRows()[0];
+  assert.equal(row[0], '<img src="x" onerror="boom"><script>window.x = 1</script>', "原文逐字显示");
+  assert.equal(row[1], "<html><b>粗体</b></html>", "回显逐字显示");
+  assert.equal(env.cacheTable.querySelectorAll("img, script, b").length, 0, "标签没有变成元素");
+  assert.equal(env.doc.querySelectorAll("script").length, 1, "设置页只保留自身的模块脚本");
+});
+
+test("缓存表格: 显示当前页、总页数与总条数", async (t) => {
+  const env = await createOptionsSandbox({
+    listCacheResult: emptyList({ page: 2, total: 45, entries: [cacheEntry(1)] }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+
+  assert.equal(env.pageInfo.textContent, "第 2 / 3 页 · 共 45 条", "页码、总页数、总条数都在");
+});
+
+test("缓存表格: 翻页发出对应页码的请求，并按回应重绘", async (t) => {
+  const pages = {
+    1: emptyList({ page: 1, total: 45, entries: [cacheEntry(45)] }),
+    2: emptyList({ page: 2, total: 45, entries: [cacheEntry(24)] }),
+    3: emptyList({ page: 3, total: 45, entries: [cacheEntry(4)] }),
+  };
+  const env = await createOptionsSandbox({ listCacheResult: (msg) => pages[msg.page] });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+  assert.equal(env.cacheRows()[0][0], "<b>orig-45</b>");
+  assert.equal(env.prevPage.disabled, true, "首页禁用上一页");
+
+  await env.clickNext();
+  assert.deepEqual(env.sentMessages.at(-1), { type: "list-cache", page: 2, pageSize: 20 });
+  assert.equal(env.cacheRows()[0][0], "<b>orig-24</b>", "表格换成第 2 页内容");
+  assert.equal(env.pageInfo.textContent, "第 2 / 3 页 · 共 45 条");
+  assert.equal(env.prevPage.disabled, false, "第 2 页可回上一页");
+
+  await env.clickNext();
+  assert.deepEqual(env.sentMessages.at(-1), { type: "list-cache", page: 3, pageSize: 20 });
+  assert.equal(env.nextPage.disabled, true, "末页禁用下一页");
+
+  await env.clickPrev();
+  assert.deepEqual(env.sentMessages.at(-1), { type: "list-cache", page: 2, pageSize: 20 });
+  assert.equal(env.cacheRows()[0][0], "<b>orig-24</b>", "回到第 2 页内容");
+});
+
+test("缓存表格: 空库显示明确空状态并禁用翻页", async (t) => {
+  const env = await createOptionsSandbox({ listCacheResult: emptyList() });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+
+  assert.equal(env.cacheRows().length, 0, "没有数据行");
+  assert.equal(env.cacheStatus.textContent, "缓存为空", "明确空状态");
+  assert.equal(env.prevPage.disabled, true, "空库禁用上一页");
+  assert.equal(env.nextPage.disabled, true, "空库禁用下一页");
+});
+
+test("缓存表格: 读取失败显示失败提示，不伪装成空库", async (t) => {
+  const env = await createOptionsSandbox({ listCacheResult: { ok: false } });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+
+  assert.equal(env.cacheStatus.textContent, "缓存读取失败，请重试", "失败提示");
+  assert.notEqual(env.cacheStatus.textContent, "缓存为空", "故障不伪装成空库");
+  assert.equal(env.prevPage.disabled, true, "失败态禁用上一页");
+  assert.equal(env.nextPage.disabled, true, "失败态禁用下一页");
+});
+
+test("缓存表格: 发送/回应抛错同样显示失败提示", async (t) => {
+  const env = await createOptionsSandbox({
+    listCacheResult: () => {
+      throw new Error("sw gone");
+    },
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+
+  assert.equal(env.cacheStatus.textContent, "缓存读取失败，请重试");
+});
+
+test("缓存表格: 越界页按回应里的归一页码重绘（当前页与按钮跟随）", async (t) => {
+  // 用户停在末页时库被清到只剩一页：background 归一到第 1 页并回告
+  const env = await createOptionsSandbox({
+    listCacheResult: (msg) =>
+      msg.page === 1
+        ? emptyList({ page: 1, total: 45, entries: [cacheEntry(45)] })
+        : emptyList({ page: 1, total: 3, entries: [cacheEntry(3)] }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+  await env.clickNext();
+
+  assert.equal(env.pageInfo.textContent, "第 1 / 1 页 · 共 3 条", "以回应里的页码为准");
+  assert.equal(env.nextPage.disabled, true, "归一后已在末页");
+  assert.equal(env.prevPage.disabled, true, "归一后已在首页");
+});
+
+test("缓存表格: 手动清空成功后回到第 1 页重新读取", async (t) => {
+  let cleared = false;
+  const env = await createOptionsSandbox({
+    clearCacheResult: { ok: true, removed: 2 },
+    listCacheResult: (msg) => {
+      if (cleared) return emptyList();
+      return msg.page === 1
+        ? emptyList({ page: 1, total: 45, entries: [cacheEntry(45)] })
+        : emptyList({ page: 2, total: 45, entries: [cacheEntry(24)] });
+    },
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+  await env.clickNext(); // 走到第 2 页
+  assert.equal(env.pageInfo.textContent, "第 2 / 3 页 · 共 45 条");
+
+  cleared = true;
+  await env.clearCache();
+
+  assert.deepEqual(
+    env.sentMessages.slice(-2),
+    [{ type: "clear-cache" }, { type: "list-cache", page: 1, pageSize: 20 }],
+    "清空后立刻回到第 1 页重新读取",
+  );
+  assert.equal(env.cacheStatus.textContent, "缓存为空", "表格立即反映清空结果");
+});
+
+test("缓存表格: 清空失败时不重新读取（表格保留原内容）", async (t) => {
+  const env = await createOptionsSandbox({
+    clearCacheResult: { ok: false, removed: 0 },
+    listCacheResult: emptyList({ total: 1, entries: [cacheEntry(1)] }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+  const before = env.cacheRows();
+
+  await env.clearCache();
+
+  assert.deepEqual(
+    env.sentMessages.filter((m) => m.type === "list-cache").length,
+    1,
+    "失败不触发重新读取",
+  );
+  assert.deepEqual(env.cacheRows(), before, "表格内容不变");
+});
+
+test("缓存表格: 离开再进入「通用」TAB 重新读取第 1 页", async (t) => {
+  const env = await createOptionsSandbox({
+    listCacheResult: emptyList({ total: 1, entries: [cacheEntry(1)] }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+  await env.selectTab("api");
+  await env.selectTab("general");
+
+  assert.deepEqual(
+    env.sentMessages,
+    [
+      { type: "list-cache", page: 1, pageSize: 20 },
+      { type: "list-cache", page: 1, pageSize: 20 },
+    ],
+    "每次进入都重新读第 1 页",
+  );
+});
+
+test("缓存表格: 打开设置页时不读取（只在进入「通用」TAB 时读）", async (t) => {
+  const env = await createOptionsSandbox();
+  t.after(() => env.dispose());
+
+  assert.deepEqual(env.sentMessages, [], "默认停在 API TAB，不发列表请求");
+});
+
+test("缓存表格: 不写任何存储，不改变任何输入框的值", async (t) => {
+  const env = await createOptionsSandbox({
+    stored: STORED_ALL,
+    listCacheResult: emptyList({ total: 1, entries: [cacheEntry(1)] }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+  await env.clickNext();
+
+  assert.deepEqual(env.syncWrites, [], "sync 一字不碰");
+  assert.deepEqual(env.storedConfig(), STORED_ALL, "存储内容原样");
+  assert.equal(env.field("model").value, "example-model-stored", "输入框的值不变");
+});
+
+test("缓存表格: 保存时表格内容不进入配置载荷", async (t) => {
+  const env = await createOptionsSandbox({
+    listCacheResult: emptyList({ total: 1, entries: [cacheEntry(1)] }),
+  });
+  t.after(() => env.dispose());
+
+  await env.selectTab("general");
+  env.field("targetLang").value = "English";
+  await env.submit();
+
+  assert.deepEqual(env.storedConfig(), { targetLang: "English" }, "只有表单字段落盘");
 });

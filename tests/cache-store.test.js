@@ -228,3 +228,133 @@ test("清空：IDB 故障返回 { ok: false, removed: 0 }、日志有记录且�
   fake.clearFailures();
   assert.deepEqual(await store.get(FP_A, "a", 2), { echo: "echo-a" }, "失败的清空不损数据");
 });
+
+// ---------------- 存储：整库分页列表（cache-inspection 票 01 / spec D2/D4/D5/D7/D9） ----------------
+// 接缝：库里实际写入了什么 ↔ list() 返回的页内容与页码。断言只看外部可观察结果：
+// 条目顺序、每页条数、total、归一后的页码、失败态与日志；原文必须从主键还原，
+// 值里不重复保存原文（fake.dump() 直接观察写入形态）。
+
+const PAGE_SIZE = 20;
+
+test("列表: 按 lastUsedAt 倒序（最新用在前），每页 20 条，翻到第二页是余下的条目", async () => {
+  const { store } = makeEnv();
+  for (let i = 1; i <= 25; i++) await store.put(FP_A, `k${i}`, `echo-${i}`, i);
+
+  const first = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(first.ok, true);
+  assert.equal(first.page, 1);
+  assert.equal(first.pageSize, PAGE_SIZE);
+  assert.equal(first.total, 25, "总条数由存储统计返回");
+  assert.equal(first.entries.length, PAGE_SIZE, "满页恰好 20 条");
+  assert.deepEqual(
+    first.entries.map((e) => e.original),
+    Array.from({ length: 20 }, (_, i) => `k${25 - i}`),
+    "倒序：k25 最新用在前，k6 收尾",
+  );
+  assert.deepEqual(first.entries[0], {
+    original: "k25",
+    echo: "echo-25",
+    lastUsedAt: 25,
+  });
+
+  const second = await store.list({ page: 2, pageSize: PAGE_SIZE });
+  assert.equal(second.page, 2);
+  assert.equal(second.total, 25);
+  assert.deepEqual(
+    second.entries.map((e) => e.original),
+    ["k5", "k4", "k3", "k2", "k1"],
+    "第二页是余下的 5 条，倒序继续",
+  );
+});
+
+test("列表: 展示整库——异指纹条目同样在列表里（不按当前指纹过滤）", async () => {
+  const { store } = makeEnv();
+  const fpOther = cacheFingerprint({ ...CONFIG_A, model: "other-model" });
+  await store.put(FP_A, "<b>A</b>", "echo-a", 1);
+  await store.put(fpOther, "<b>B</b>", "echo-b", 2);
+
+  const page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+
+  assert.equal(page.total, 2);
+  assert.deepEqual(
+    page.entries.map((e) => e.original),
+    ["<b>B</b>", "<b>A</b>"],
+    "两个指纹的条目都在，仍按 lastUsedAt 倒序",
+  );
+});
+
+test("列表: 空库 → ok、第 1 页、total 0、空条目", async () => {
+  const { store } = makeEnv();
+
+  assert.deepEqual(await store.list({ page: 1, pageSize: PAGE_SIZE }), {
+    ok: true,
+    page: 1,
+    pageSize: PAGE_SIZE,
+    total: 0,
+    entries: [],
+  });
+});
+
+test("列表: 越界页归一到有效页（超出取末页，小于 1 取首页）", async () => {
+  const { store } = makeEnv();
+  for (let i = 1; i <= 3; i++) await store.put(FP_A, `k${i}`, `echo-${i}`, i);
+
+  const beyond = await store.list({ page: 99, pageSize: PAGE_SIZE });
+  assert.equal(beyond.page, 1, "只有一页时超出页码归一为第 1 页");
+  assert.equal(beyond.entries.length, 3, "归一的页码带着该页内容");
+
+  const multi = makeEnv().store;
+  for (let i = 1; i <= 21; i++) await multi.put(FP_A, `k${i}`, `echo-${i}`, i);
+  const last = await multi.list({ page: 5, pageSize: PAGE_SIZE });
+  assert.equal(last.page, 2, "两页库里请求第 5 页 → 归一到末页");
+  assert.deepEqual(
+    last.entries.map((e) => e.original),
+    ["k1"],
+    "末页内容是最后那一条",
+  );
+
+  const below = await multi.list({ page: 0, pageSize: PAGE_SIZE });
+  assert.equal(below.page, 1, "页码小于 1 → 归一为第 1 页");
+  assert.equal(below.entries.length, PAGE_SIZE);
+});
+
+test("列表: 原文从主键还原（含键分隔符的原文无损），值里不重复保存原文", async () => {
+  const { fake, store } = makeEnv();
+  const tricky = "<b>a</b>\x1f<b>b</b>"; // 原文自身含键分隔符
+  await store.put(FP_A, tricky, "echo-tricky", 7);
+
+  const page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+
+  assert.equal(page.entries[0].original, tricky, "按定长指纹切掉键前缀即得原文");
+  assert.equal(page.entries[0].echo, "echo-tricky");
+  const [record] = fake.dump();
+  assert.deepEqual(
+    Object.keys(record.value).sort(),
+    ["echo", "lastUsedAt"],
+    "值只存 { echo, lastUsedAt }：原文不重复保存",
+  );
+  assert.ok(record.key.endsWith(tricky), "原文只在主键里出现一次");
+});
+
+test("列表: IDB 故障返回 { ok: false }（不伪装成空库）并记日志，恢复后照常", async () => {
+  const { fake, logs, store } = makeEnv();
+  await store.put(FP_A, "a", "echo-a", 1);
+
+  fake.failRequests(new Error("list boom"));
+  assert.deepEqual(await store.list({ page: 1, pageSize: PAGE_SIZE }), { ok: false });
+  assert.equal(logs.length, 1, "记一条日志");
+  assert.ok(logs[0].includes("cache list failed") && logs[0].includes("list boom"));
+
+  fake.clearFailures();
+  const page = await store.list({ page: 1, pageSize: PAGE_SIZE });
+  assert.equal(page.ok, true, "故障恢复后照常返回列表");
+  assert.equal(page.total, 1);
+});
+
+test("列表: 打开失败同样返回 { ok: false }，不抛", async () => {
+  const { fake, logs, store } = makeEnv();
+  fake.failOpen(new Error("open boom"));
+
+  assert.deepEqual(await store.list({ page: 1, pageSize: PAGE_SIZE }), { ok: false });
+  assert.ok(logs[0].includes("cache list failed") && logs[0].includes("open boom"));
+});

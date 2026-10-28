@@ -60,18 +60,23 @@ async function settle(rounds = 4) {
   for (let i = 0; i < rounds; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
-// createOptionsSandbox({ stored, clearCacheResult }): stored 为 sync 存储里 config 的
-// 原始值，null 表示存储里没有 config 键；clearCacheResult 为「清空缓存」按钮发出
-// runtime 消息后收到的回应（缺省 = 空库成功）。返回：
+// createOptionsSandbox({ stored, clearCacheResult, listCacheResult }): stored 为 sync 存储里
+// config 的原始值，null 表示存储里没有 config 键；clearCacheResult 为「清空缓存」按钮发出
+// runtime 消息后收到的回应（缺省 = 空库成功）；listCacheResult 为缓存列表消息的回应——
+// 值或 (msg) => 回应 的函数（需要按请求页码给不同回应的用例用它）。返回：
 //   dom/doc/form/status、field(name)（输入框元素）、submit()（提交表单并等写完存储）、
 //   restore(group)（点该组的「恢复默认」，等 click 处理器跑完）、
 //   clearCache()（点「清空缓存」，等 click 处理器跑完）、
+//   selectTab(name)（点 TAB 并等异步流程跑完）、
+//   cacheRows()（缓存表格的正文：每行是各单元格的文本）、cacheStatus/pageInfo（缓存视图的
+//   状态文案与页码文案）、prevPage()/nextPage()（点翻页按钮并等异步流程跑完）、
 //   syncWrites（sync 区域的写操作记录，未写过 = 空数组）、
 //   sentMessages（runtime.sendMessage 发出的消息，按序记录）、
 //   storedConfig()（存储里 config 的当前值，键被删除 = null）、dispose()（还原全局注入）
 async function createOptionsSandbox({
   stored = null,
   clearCacheResult = { ok: true, removed: 0 },
+  listCacheResult = { ok: true, page: 1, pageSize: 20, total: 0, entries: [] },
 } = {}) {
   const dom = new JSDOM(OPTIONS_HTML, { url: "https://example.test/options.html" });
   const doc = dom.window.document;
@@ -85,6 +90,9 @@ async function createOptionsSandbox({
     runtime: {
       sendMessage: async (msg) => {
         sentMessages.push(msg);
+        if (msg?.type === "list-cache") {
+          return typeof listCacheResult === "function" ? listCacheResult(msg) : listCacheResult;
+        }
         return clearCacheResult;
       },
     },
@@ -129,6 +137,30 @@ async function createOptionsSandbox({
     },
     async clearCache() {
       doc.getElementById("clear-cache").click();
+      await settle();
+    },
+    // TAB 切换（缓存表格的加载时机就在这个动作上）
+    async selectTab(name) {
+      doc.getElementById(`tab-${name}`).click();
+      await settle();
+    },
+    // 缓存表格正文：每行是各单元格的纯文本
+    cacheRows() {
+      return [...doc.querySelectorAll("#cache-rows tr")].map((tr) =>
+        [...tr.children].map((td) => td.textContent),
+      );
+    },
+    cacheTable: doc.getElementById("cache-table"),
+    cacheStatus: doc.getElementById("cache-status"),
+    pageInfo: doc.getElementById("cache-page-info"),
+    prevPage: doc.getElementById("cache-prev"),
+    nextPage: doc.getElementById("cache-next"),
+    async clickPrev() {
+      doc.getElementById("cache-prev").click();
+      await settle();
+    },
+    async clickNext() {
+      doc.getElementById("cache-next").click();
       await settle();
     },
     syncWrites: sync.writes,

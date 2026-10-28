@@ -2,9 +2,12 @@
 // 只实现 src/cache-store.js 用到的最小面：
 //   open(name, version)：新库或版本升高时先派 onupgradeneeded 再派 onsuccess；
 //   db.objectStoreNames.contains / db.createObjectStore().createIndex / db.transaction()；
-//   store.get / put / count / clear，store.index().openCursor()（按索引键升序，次键为主键字典序）；
+//   store.get / put / count / clear，store.index().openCursor(query, direction)
+//     （按索引键升序，次键为主键字典序；direction 为 "prev" 时整个次序反转，
+//     与真实 IndexedDB 的 prev 游标一致——倒序分页读的是最新用在前）；
 //   cursor.value / primaryKey / delete() / continue()；
-//   tx.oncomplete / onerror（请求全部落定后派 complete）。
+//   tx.oncomplete / onerror（请求全部落定后派 complete）；
+//   dump()：全库转储，供「值里不重复保存原文」这类存储形态断言直接观察写入结果。
 // 请求与事务回调一律经 queueMicrotask 派发，保持与真实 IndexedDB 一致的
 // 「先注册回调、后异步触发」时序；cursor.delete() 同步生效（模块不等待其结果，
 // 与真实游标删除不扰动既有迭代位置的语义一致——游标遍历的是打开时刻的快照）。
@@ -75,9 +78,9 @@ function createFakeIndexedDB() {
       return req;
     }
 
-    // 索引游标：打开时取快照按索引键升序；continue() 推进一格再派同一请求的 onsuccess；
-    // 末尾（或空库）派 result = null
-    function openCursor(indexName) {
+    // 索引游标：打开时取快照按索引键升序（direction = "prev" 时整序反转）；
+    // continue() 推进一格再派同一请求的 onsuccess；末尾（或空库）派 result = null
+    function openCursor(indexName, direction) {
       const keyPath = store.indexes.get(indexName);
       const req = makeRequest();
       if (state.failRequestsWith) {
@@ -91,6 +94,7 @@ function createFakeIndexedDB() {
       const entries = [...store.records.entries()]
         .map(([key, value]) => ({ key, indexKey: value[keyPath], value }))
         .sort((a, b) => a.indexKey - b.indexKey || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+      if (direction === "prev") entries.reverse();
       let pos = 0;
       const step = () =>
         unit(() => {
@@ -132,7 +136,9 @@ function createFakeIndexedDB() {
         request(() => {
           store.records.clear();
         }),
-      index: (indexName) => ({ openCursor: () => openCursor(indexName) }),
+      index: (indexName) => ({
+        openCursor: (query, direction) => openCursor(indexName, direction),
+      }),
     });
     return tx;
   }
@@ -195,6 +201,19 @@ function createFakeIndexedDB() {
     clearFailures() {
       state.failOpenWith = null;
       state.failRequestsWith = null;
+    },
+    // 全库转储：[{ database, store, key, value }]。真实 IndexedDB 在 devtools 里同样
+    // 可逐条查看；这里给测试一个只读观察口，用于断言值的存储形态（如值里不重复保存原文）
+    dump() {
+      const out = [];
+      for (const [database, db] of databases) {
+        for (const [storeName, store] of db.stores) {
+          for (const [key, value] of store.records) {
+            out.push({ database, store: storeName, key, value: { ...value } });
+          }
+        }
+      }
+      return out;
     },
     reset() {
       for (const db of databases.values()) {

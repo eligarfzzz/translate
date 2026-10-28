@@ -42,8 +42,15 @@ const INDEX_NAME = "lastUsedAt";
 // 都不产生歧义；分隔符只是可读性间隔
 const KEY_SEPARATOR = "\x1f";
 
+// 原文还原（D7）：键 = 指纹 + 分隔符 + 原文，指纹只含十六进制字符（定长输出）、
+// 不会命中分隔符——首个分隔符之后即原文，值里因此不必再存一份原文
 function keyOf(fingerprint, original) {
   return fingerprint + KEY_SEPARATOR + original;
+}
+
+function originalOfKey(key) {
+  const text = String(key);
+  return text.slice(text.indexOf(KEY_SEPARATOR) + 1);
 }
 
 // 单请求 Promise 化
@@ -201,7 +208,58 @@ function createCacheStore({ indexedDB: idb, log = () => {} } = {}) {
     }
   }
 
-  return { get, put, cleanup, clear };
+  // 整库分页列表（D7/D8）：复用 lastUsedAt 索引的反向游标——最新用在前；原文从游标
+  // 主键还原（值里不重复保存原文），总条数由 store.count() 给出。页码边界（D5）：
+  // 请求页码归一为 [1, 总页数]，空库归一为第 1 页的空结果；归一后的页码随内容一起
+  // 返回，调用方不必自己算。返回 { ok: true, page, pageSize, total, entries }，
+  // entries = [{ original, echo, lastUsedAt }]。与翻译路径的降级口径不同：用户主动
+  // 查看时的 IDB 故障记日志并返回 { ok: false }（D9）——设置页据此显示失败提示，
+  // 不得伪装成空库；故障不抛给调用方（与其余方法同形）。
+  async function list({ page, pageSize }) {
+    try {
+      const db = await open();
+      const size = Math.max(1, Math.trunc(pageSize) || 1);
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const store = tx.objectStore(STORE_NAME);
+      const total = await resultOf(store.count());
+      const pages = Math.max(1, Math.ceil(total / size));
+      const wanted = Math.max(1, Math.trunc(page) || 1);
+      const effectivePage = Math.min(wanted, pages);
+      const skip = (effectivePage - 1) * size;
+
+      const entries = await new Promise((resolve, reject) => {
+        const request = store.index(INDEX_NAME).openCursor(null, "prev");
+        request.onerror = () => reject(request.error);
+        let skipped = 0;
+        const collected = [];
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor || collected.length >= size) {
+            resolve(collected);
+            return;
+          }
+          if (skipped < skip) {
+            skipped += 1;
+            cursor.continue();
+            return;
+          }
+          collected.push({
+            original: originalOfKey(cursor.primaryKey),
+            echo: cursor.value.echo,
+            lastUsedAt: cursor.value.lastUsedAt,
+          });
+          cursor.continue();
+        };
+      });
+
+      return { ok: true, page: effectivePage, pageSize: size, total, entries };
+    } catch (e) {
+      log("cache list failed:", e);
+      return { ok: false };
+    }
+  }
+
+  return { get, put, cleanup, clear, list };
 }
 
 export { createCacheStore, cacheFingerprint, fitsCacheBytes, DAY_MS };

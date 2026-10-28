@@ -205,12 +205,22 @@ function cacheableEcho(full) {
 //     通道打开（return true）。清空与 cacheEnabled 无关（D6）：不加载配置，开关关着照清。
 //     失败留痕由 store 经注入的日志回调（本文件的 DBG.error 通道）完成，本分支不重复记
 //     第二条，也不另设 try/catch——store 的 clear() 本身不抛（D10 收口）。
+//   list-cache（设置页分页查看，cache-inspection 票 01）：独立的请求—响应消息，与清空 /
+//     清理各自契约、不合并成带模式参数的消息（D8）。请求携带 page / pageSize，回应
+//     { ok: true, page, pageSize, total, entries } 或失败态 { ok: false }（D9：主动读取的
+//     故障必须可见）。不读配置也不看 cacheEnabled——展示的是整库实际内容（D2），
+//     与手动清空同一范围；数据库结构知识因此仍只在 store 模块（本分支只转交页码）。
 //   cleanup-cache（自动清理触发，D7）：content 在每会话首轮落定后发来；缓存开才以当前配置
 //     执行一次清理（删过期 + 淘超限），缓存关一律不清。清理失败只记日志——它没有也不该有
 //     页面可见面。fire-and-forget：不读回应通道。
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "clear-cache") {
     cache.clear().then((result) => sendResponse({ ok: result.ok, removed: result.removed }));
+    return true; // 异步回应：保持回应通道打开
+  }
+  if (msg?.type === "list-cache") {
+    // store.list 不抛（故障收口为 { ok: false }，日志已在 store 侧留痕）
+    cache.list({ page: msg.page, pageSize: msg.pageSize }).then((result) => sendResponse(result));
     return true; // 异步回应：保持回应通道打开
   }
   if (msg?.type !== "cleanup-cache") return;
