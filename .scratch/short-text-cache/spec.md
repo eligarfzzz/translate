@@ -58,7 +58,7 @@ Status: ready-for-agent
 - 手动清空缓存的 UI 按钮（DevTools 可清；等真实需求再加）。——**已搬进范围**：由 cache-manual-clear 落地（见 `.scratch/cache-manual-clear/spec.md`），配置页「通用」TAB 已有「清空缓存」按钮（整库清空、与开关无关、回应条数；契约见 `docs/adr/0008-short-text-cache.md` 的 Evolved 段）。
 - 长文本（超阈值）缓存、整页快照缓存。
 - 跨设备同步（缓存只存本地 IndexedDB，不进 `chrome.storage.sync`）。
-- 命中率等统计面板。
+- 命中率等统计面板。——**部分搬进范围**：每条缓存的累计命中次数及其在分页缓存表格中的展示由 cache-inspection 落地；全局命中率、未命中次数和独立统计面板仍在范围外（见 `.scratch/cache-inspection/spec.md`）。
 - 缓存条目的导入导出。
 
 ## Further Notes
